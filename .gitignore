@@ -1,0 +1,33 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# Node (if tooling is added later)
+node_modules/
+npm-debug.log*
+
+# Build / packaging output
+*.zip
+*.crx
+*.pem
+dist/
+
+# Local secrets / env
+.env
+.env.local
+
+# Local helper scripts & icon explorations
+apply_icon.py
+docs/
+
+*.bat
+

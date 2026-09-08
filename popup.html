@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GMN Universal Video Summarizer</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 380px;
+      min-height: 420px;
+      max-height: 580px;
+      background: #000000;
+      color: #eff3f4;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding: 14px 16px;
+      user-select: none;
+      border: 1px solid #2f3336;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #2f3336;
+      margin-bottom: 10px;
+    }
+
+    .title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-icon {
+      font-size: 18px;
+    }
+
+    .title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.2px;
+    }
+
+    .badge-ver {
+      font-size: 10px;
+      font-weight: 700;
+      background: rgba(29, 155, 240, 0.15);
+      color: #1d9bf0;
+      padding: 2px 6px;
+      border-radius: 9999px;
+      border: 1px solid rgba(29, 155, 240, 0.3);
+    }
+
+    /* Navigation Tabs */
+    .nav-tabs {
+      display: flex;
+      background: #16181c;
+      border: 1px solid #2f3336;
+      border-radius: 9999px;
+      padding: 3px;
+      margin-bottom: 12px;
+      gap: 2px;
+    }
+
+    .nav-tab {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: transparent;
+      color: #71767b;
+      border: none;
+      border-radius: 9999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+
+    .nav-tab:hover {
+      color: #eff3f4;
+      background: rgba(239, 243, 244, 0.05);
+    }
+
+    .nav-tab.active {
+      background: #1d9bf0;
+      color: #ffffff;
+    }
+
+    .tab-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.2);
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 9999px;
+      min-width: 16px;
+    }
+
+    .nav-tab:not(.active) .tab-badge {
+      background: #2f3336;
+      color: #71767b;
+    }
+
+    /* Content Panels */
+    .tab-panel {
+      display: none;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .tab-panel.active {
+      display: flex;
+    }
+
+    /* Controls Tab */
+    .setting-card {
+      background: #16181c;
+      border: 1px solid #2f3336;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .toggle-info {
+      flex: 1;
+    }
+
+    .toggle-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #ffffff;
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .toggle-desc {
+      font-size: 11px;
+      color: #71767b;
+      line-height: 1.35;
+    }
+
+    /* iOS Style Switch */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #2f3336;
+      transition: .25s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 2px;
+      bottom: 2px;
+      background-color: #ffffff;
+      transition: .25s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: 50%;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    }
+
+    input:checked + .slider {
+      background-color: #1d9bf0;
+      border-color: #1d9bf0;
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+
+    /* Tip box */
+    .tip-box {
+      background: rgba(29, 155, 240, 0.08);
+      border: 1px solid rgba(29, 155, 240, 0.2);
+      border-radius: 8px;
+      padding: 9px 11px;
+      font-size: 11px;
+      color: #8ecdf8;
+      line-height: 1.4;
+      margin-bottom: 14px;
+    }
+
+    .tip-box b {
+      color: #ffffff;
+    }
+
+    /* Action Button */
+    .btn-action {
+      width: 100%;
+      background: #1d9bf0;
+      color: #ffffff;
+      border: none;
+      border-radius: 9999px;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s ease, transform 0.1s ease;
+      font-family: inherit;
+    }
+
+    .btn-action:hover {
+      background: #1a8cd8;
+    }
+
+    .btn-action:active {
+      transform: scale(0.98);
+    }
+
+    /* Storage History Tab */
+    .hist-toolbar {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .hist-search-wrap {
+      position: relative;
+    }
+
+    .hist-search-input {
+      width: 100%;
+      background: #16181c;
+      border: 1px solid #2f3336;
+      border-radius: 8px;
+      color: #eff3f4;
+      font-size: 12px;
+      padding: 7px 10px;
+      outline: none;
+      font-family: inherit;
+    }
+
+    .hist-search-input:focus {
+      border-color: #1d9bf0;
+    }
+
+    .hist-actions-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .hist-sub-title {
+      font-size: 11px;
+      color: #71767b;
+      font-weight: 600;
+    }
+
+    .hist-btn-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-sm {
+      background: #16181c;
+      border: 1px solid #2f3336;
+      color: #eff3f4;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s;
+    }
+
+    .btn-sm:hover {
+      background: #202327;
+      border-color: #38444d;
+    }
+
+    /* History List & Cards */
+    .hist-list {
+      flex: 1;
+      overflow-y: auto;
+      max-height: 380px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-right: 2px;
+    }
+
+    .hist-list::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .hist-list::-webkit-scrollbar-thumb {
+      background: #2f3336;
+      border-radius: 4px;
+    }
+
+    .hist-card {
+      background: #16181c;
+      border: 1px solid #2f3336;
+      border-radius: 10px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    .hist-card:hover {
+      border-color: #38444d;
+      background: #1c1f24;
+    }
+
+    .hist-card-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .hist-tags {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .hist-tag {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .hist-tag-plat {
+      background: rgba(29, 155, 240, 0.15);
+      color: #1d9bf0;
+      border: 1px solid rgba(29, 155, 240, 0.3);
+    }
+
+    .hist-tag-size {
+      background: #202327;
+      color: #eff3f4;
+      border: 1px solid #2f3336;
+    }
+
+    .hist-tag-time {
+      font-size: 10px;
+      color: #00ba7c;
+      font-weight: 600;
+    }
+
+    .hist-tag-expired {
+      color: #f4212e;
+    }
+
+    .hist-card-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1.3;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+
+    .hist-card-title:hover {
+      color: #1d9bf0;
+      text-decoration: underline;
+    }
+
+    /* Google Files API URI Box */
+    .hist-uri-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #0d0e10;
+      border: 1px solid #24272c;
+      border-radius: 6px;
+      padding: 4px 8px;
+      gap: 6px;
+    }
+
+    .hist-uri-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 10px;
+      color: #8ecdf8;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+
+    .btn-copy-uri {
+      background: transparent;
+      border: 1px solid #2f3336;
+      color: #71767b;
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      flex-shrink: 0;
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+
+    .btn-copy-uri:hover {
+      color: #eff3f4;
+      border-color: #1d9bf0;
+      background: rgba(29, 155, 240, 0.1);
+    }
+
+    .hist-snippet {
+      font-size: 11px;
+      color: #71767b;
+      line-height: 1.35;
+      max-height: 38px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+
+    .hist-card-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-top: 2px;
+      padding-top: 6px;
+      border-top: 1px solid #24272c;
+    }
+
+    .btn-load {
+      background: rgba(0, 186, 124, 0.15);
+      border: 1px solid rgba(0, 186, 124, 0.35);
+      color: #00ba7c;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .btn-load:hover {
+      background: #00ba7c;
+      color: #ffffff;
+    }
+
+    .btn-del {
+      background: transparent;
+      border: 1px solid #2f3336;
+      color: #71767b;
+      font-size: 11px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+
+    .btn-del:hover {
+      color: #f4212e;
+      border-color: rgba(244, 33, 46, 0.4);
+      background: rgba(244, 33, 46, 0.1);
+    }
+
+    /* Empty State */
+    .hist-empty {
+      padding: 30px 16px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      color: #71767b;
+    }
+
+    .hist-empty-icon {
+      font-size: 32px;
+      opacity: 0.6;
+    }
+
+    .hist-empty-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #eff3f4;
+    }
+
+    .hist-empty-desc {
+      font-size: 11px;
+      line-height: 1.4;
+      max-width: 260px;
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      font-size: 10px;
+      color: #71767b;
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid #2f3336;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title-wrap">
+      <span class="logo-icon">🌐</span>
+      <span class="title">Video Summarizer</span>
+    </div>
+    <span class="badge-ver">v2.0</span>
+  </div>
+
+  <!-- Navigation Tabs -->
+  <div class="nav-tabs">
+    <button type="button" class="nav-tab active" id="tab-btn-controls">
+      <span>⚙️ Controls</span>
+    </button>
+    <button type="button" class="nav-tab" id="tab-btn-history">
+      <span>🕒 Storage History</span>
+      <span class="tab-badge" id="history-badge">0</span>
+    </button>
+  </div>
+
+  <!-- Panel 1: Controls -->
+  <div class="tab-panel active" id="panel-controls">
+    <div class="setting-card">
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span class="toggle-label">Show button on video</span>
+          <span class="toggle-desc">Show "Summarize Video" button overlay directly on video players</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggle-badge" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="tip-box">
+      💡 <b>Tip:</b> If disabled, buttons are hidden, but you can still summarize any video by right-clicking it and selecting <b>"✨ Summarize / Caption This Video"</b>.
+    </div>
+
+    <button class="btn-action" id="btn-open-panel">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+      </svg>
+      <span>Open Summarizer on Page</span>
+    </button>
+  </div>
+
+  <!-- Panel 2: Storage Upload History -->
+  <div class="tab-panel" id="panel-history">
+    <div class="hist-toolbar">
+      <div class="hist-search-wrap">
+        <input type="text" id="hist-search" class="hist-search-input" placeholder="🔍 Search uploaded pages & files..." />
+      </div>
+      <div class="hist-actions-bar">
+        <span class="hist-sub-title" id="hist-status-text">Google Files API uploads (48h cache)</span>
+        <div class="hist-btn-group">
+          <button type="button" class="btn-sm" id="btn-verify-history" title="Verify Google Files API status">🔄 Verify</button>
+          <button type="button" class="btn-sm" id="btn-clear-expired" title="Clear expired files from list">🧹 Prune</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="hist-list" id="hist-list">
+      <!-- Uploaded video history cards rendered dynamically -->
+    </div>
+  </div>
+
+  <div class="footer">
+    Gemini 2.5 / 3.0 Multimodal • Google Files API Storage Engine
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
