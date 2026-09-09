@@ -467,17 +467,18 @@
 
 #gvc-raw {
   margin-top: 6px;
-  background: #050505;
+  background: #08090a;
   border: 1px solid #2f3336;
   border-radius: 8px;
-  padding: 8px;
-  font-size: 11px;
-  color: #f4212e;
-  max-height: 120px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: #e7e9ea;
+  line-height: 1.45;
+  max-height: 480px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
-  font-family: monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   display: none;
 }
 
@@ -498,6 +499,17 @@
   font-weight: 800;
   font-size: 13px;
   margin-bottom: 6px;
+}
+
+.gvc-err-guidance {
+  color: #eff3f4;
+  background: rgba(29, 155, 240, 0.12);
+  border-left: 3px solid #1d9bf0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 6px 0 8px 0;
 }
 
 .gvc-err-reason {

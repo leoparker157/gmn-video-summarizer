@@ -1702,10 +1702,23 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
 
 // ── YouTube Cloud Direct Analysis Handler (Mode 1) ───────────────────────────
 async function handleAnalyzeYouTubeDirect(msg, send) {
-  const { sessionId, youtubeUrl, startOffset, endOffset, apiKey, model, payload, prompt, systemPrompt, generationConfig, retryCount, retryDelayMs } = msg;
+  const { sessionId, youtubeUrl, totalDuration, startOffset, endOffset, apiKey, model, payload, prompt, systemPrompt, generationConfig, retryCount, retryDelayMs } = msg;
 
   if (!apiKey) throw new Error('Missing Gemini API Key');
   if (!youtubeUrl) throw new Error('Missing YouTube Video URL');
+
+  const MAX_CLOUD_DIRECT_SECONDS = 10800; // 3 hours (180 minutes)
+  if (totalDuration && totalDuration > MAX_CLOUD_DIRECT_SECONDS) {
+    const durMin = Math.round(totalDuration / 60);
+    const durHours = (totalDuration / 3600).toFixed(1);
+    throw new Error(`Google Cloud Direct Limit Exceeded: This video is ${durHours} hours (${durMin} minutes) long. Google Gemini API strictly caps Cloud Direct YouTube processing to a maximum of 3 hours (180 minutes) total duration. Please switch to Mode 2 (Local Download & Upload).`);
+  }
+
+  const sSec = parseFloat(String(startOffset || '0').replace('s', '')) || 0;
+  const eSec = parseFloat(String(endOffset || '0').replace('s', '')) || 0;
+  if (eSec > MAX_CLOUD_DIRECT_SECONDS || (eSec - sSec) > MAX_CLOUD_DIRECT_SECONDS) {
+    throw new Error(`Google Cloud Direct Limit Exceeded: The requested time range (${startOffset} - ${endOffset}) exceeds Google's 3-hour (180 minutes) maximum window. Please adjust the range to under 3 hours (180 minutes) or switch to Mode 2 (Local Download & Upload).`);
+  }
 
   send({ type: 'PROGRESS', message: 'Connecting to Gemini Cloud Direct (Zero Bandwidth)...' });
 
@@ -2487,24 +2500,42 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
       let errorJson = null;
       try { errorJson = JSON.parse(rawText); } catch (_) {}
 
-      let errMessage = (errorJson && errorJson.error && errorJson.error.message) ? errorJson.error.message : rawText;
+      let rawApiMessage = (errorJson && errorJson.error && errorJson.error.message) ? errorJson.error.message : rawText;
+      let friendlyAdvice = '';
 
       let humanReason = `HTTP ${status}`;
-      if (status === 429) humanReason = 'Rate Limit / Quota Exceeded (429)';
-      else if (status === 503 || errMessage.includes('unreachable') || errMessage.includes('overloaded')) humanReason = 'Model Overloaded / High Demand (503)';
-      else if (status === 400 && errMessage.includes('10800 images')) {
-        humanReason = 'Video Segment Exceeds 3 Hours Limit';
-        errMessage = 'The selected video range exceeds Google Gemini 3-hour maximum limit (10,800 frames at 1 fps). Please adjust your start and end offset to under 3 hours (180 minutes) or switch to Mode 2 (Local Download & Upload).';
+      if (status === 429) {
+        humanReason = 'Rate Limit / Quota Exceeded (429)';
+        friendlyAdvice = 'You reached your Gemini API rate limit. Please wait a moment before retrying, or check your quota at ai.google.dev.';
+      } else if (status === 503 || rawApiMessage.includes('unreachable') || rawApiMessage.includes('overloaded')) {
+        humanReason = 'Model Overloaded / High Demand (503)';
+        friendlyAdvice = 'Google servers are temporarily experiencing high traffic spikes. Please wait a moment and click "Retry Analysis", or select a Flash model.';
+      } else if (status === 400 && (rawApiMessage.includes('10800 images') || rawApiMessage.includes('10800'))) {
+        humanReason = 'Video Exceeds 3 Hours (180 Minutes) Limit (400)';
+        friendlyAdvice = 'The video duration or selected time range exceeds Google Gemini 3-hour (180 minutes) limit. Please reduce your time range or switch to Mode 2 (Local Download & Upload).';
+      } else if (status === 400 && (rawApiMessage.includes('Request contains an invalid argument') || rawApiMessage.includes('INVALID_ARGUMENT'))) {
+        humanReason = 'Invalid Argument / Unsupported Stream (400)';
+        friendlyAdvice = 'The video length or context window may have exceeded Gemini limits. Try selecting a shorter time range/video length, or switch to Mode 2 (Local Download & Upload) which bypasses Cloud Direct limits.';
+      } else if (status === 400) {
+        humanReason = 'Invalid Request / File State (400)';
+        friendlyAdvice = 'Google rejected this request format. Try a shorter video segment, or switch to Mode 2 (Local Download & Upload).';
+      } else if (status === 403) {
+        humanReason = 'Permission Denied / Invalid API Key (403)';
+        friendlyAdvice = 'Your Gemini API Key was rejected by Google. Please check your API key in Settings (⚙️).';
+      } else if (status === 404) {
+        humanReason = `Model Not Found: "${currentModel}" (404)`;
+        friendlyAdvice = `The model "${currentModel}" was not found or is deprecated. Please select a supported model like gemini-2.5-flash or gemini-3.5-flash in Settings.`;
+      } else if (status >= 500) {
+        humanReason = `Google Server Error (${status})`;
+        friendlyAdvice = 'Google encountered an internal server error. Please retry in a few moments.';
       }
-      else if (status === 400) humanReason = 'Invalid Request / File State (400)';
-      else if (status === 403) humanReason = 'Permission Denied / Invalid API Key (403)';
-      else if (status === 404) humanReason = `Model Not Found: "${currentModel}" (404)`;
-      else if (status >= 500) humanReason = `Google Server Error (${status})`;
 
       lastError = {
         status,
         humanReason,
-        message: errMessage,
+        message: friendlyAdvice || rawApiMessage,
+        friendlyAdvice,
+        rawApiMessage,
         rawText,
         errorJson
       };
