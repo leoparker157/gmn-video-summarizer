@@ -6677,32 +6677,9 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
   // Case B: If on YouTube, resolve stream and auto-upload
   if (currentYouTubeData && currentYouTubeData.videoId) {
     if (forChat) {
-      updateChatTypingStatus('Fetching video stream for active API key...\nResolving stream from YouTube page player...');
+      updateChatTypingStatus('Fetching video stream for active API key...\nResolving and deciphering stream from YouTube page player...');
     }
 
-    // Priority 0: If we already have stream URLs from the page player, use them directly
-    // These URLs were obtained through YouTube's legitimate BotGuard flow and are authenticated
-    if (currentYouTubeData.videoStreams && currentYouTubeData.videoStreams.length > 0) {
-      const directStream = currentYouTubeData.videoStreams.find(s => s.url && s.mimeType && s.mimeType.includes('video/')) || currentYouTubeData.videoStreams[0];
-      if (directStream && directStream.url) {
-        console.log('[GVC] Using page player stream URL directly for tab streaming:', directStream.qualityLabel || directStream.label);
-        const streamUrl = directStream.url.includes('cpn=')
-          ? directStream.url
-          : directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-        startTabStreamingDownload({
-          streamUrl,
-          totalLength: parseInt(directStream.contentLength, 10) || 0,
-          quality: directStream.qualityLabel || '360p',
-          isQualityFallback: false,
-          videoId: currentYouTubeData.videoId,
-          videoTitle: currentYouTubeData.title,
-          autoUpload: true,
-          apiKey: apiKey,
-          forChat: Boolean(forChat)
-        });
-        return;
-      }
-    }
     const qId = 'yt_stream_' + Date.now();
     let handled = false;
     let fallbackTimer = null;
@@ -6756,12 +6733,12 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
       mediaType: 'video'
     }, '*');
 
-    // Robust 2.5s fallback to background YouTube.js if main world doesn't answer
+    // Robust 6.0s fallback to background YouTube.js if main world doesn't answer
     fallbackTimer = setTimeout(() => {
       if (!handled) {
         handled = true;
         window.removeEventListener('message', streamResolvedHandler);
-        console.log('[GVC] Main world stream resolve timed out after 2.5s, falling back to background YouTube.js');
+        console.log('[GVC] Main world stream resolve timed out after 6s, falling back to background YouTube.js');
         connectPort();
         port.postMessage({
           type: 'YOUTUBE_JS_DOWNLOAD',
@@ -7296,29 +7273,6 @@ async function handleMainActionClick() {
           if (btnCont2) btnCont2.style.display = 'none';
           const btnNew2 = el('gvc-btn-new-chat');
           if (btnNew2) btnNew2.style.display = 'none';
-
-          // Priority 0: If we already have stream URLs from the page player, use them directly
-          if (currentYouTubeData.videoStreams && currentYouTubeData.videoStreams.length > 0) {
-            const directStream = currentYouTubeData.videoStreams.find(s => s.url && s.mimeType && s.mimeType.includes('video/')) || currentYouTubeData.videoStreams[0];
-            if (directStream && directStream.url) {
-              console.log('[GVC] Manual download: Using page player stream URL for tab streaming:', directStream.qualityLabel || directStream.label);
-              const streamUrl = directStream.url.includes('cpn=')
-                ? directStream.url
-                : directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-              startTabStreamingDownload({
-                streamUrl,
-                totalLength: parseInt(directStream.contentLength, 10) || 0,
-                quality: directStream.qualityLabel || '360p',
-                isQualityFallback: false,
-                videoId: currentYouTubeData.videoId,
-                videoTitle: currentYouTubeData.title,
-                autoUpload: true,
-                apiKey: apiKey,
-                forChat: false
-              });
-              return;
-            }
-          }
 
           const qId = 'yt_stream_' + Date.now();
           let handled = false;

@@ -32133,9 +32133,26 @@ return process("${n || ""}", "${sp || ""}", "${s || ""}");`;
     return hex(await crypto.subtle.digest("SHA-1", new TextEncoder().encode(str)));
   }
 
-  // ../../.gemini/antigravity-ide/brain/3fbc35a9-cb64-4749-8d18-cc467a354ca8/scratch/node_modules/youtubei.js/dist/src/platform/jsruntime/default.js
-  function evaluate(_data24, _env) {
-    throw new Error("To decipher URLs, you must provide your own JavaScript evaluator. See https://ytjs.dev/guide/getting-started.html#providing-a-custom-javascript-interpreter for more details.");
+  let _gvcBundleTrustedPolicy = null;
+  function evaluate(data24, _env) {
+    if (!_gvcBundleTrustedPolicy) {
+      _gvcBundleTrustedPolicy = globalThis.__GVC_TRUSTED_POLICY__ || globalThis.trustedTypes?.defaultPolicy || null;
+      if (!_gvcBundleTrustedPolicy && globalThis.trustedTypes?.createPolicy) {
+        for (const name of ['gvc-eval', 'youtube-eval', 'default', 'youtube']) {
+          try {
+            _gvcBundleTrustedPolicy = globalThis.trustedTypes.createPolicy(name, { createScript: s => s });
+            if (_gvcBundleTrustedPolicy) {
+              globalThis.__GVC_TRUSTED_POLICY__ = _gvcBundleTrustedPolicy;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    const rawCode = (typeof data24 === 'object' && data24 !== null && data24.output) ? data24.output : String(data24 || '');
+    const code = `(() => {\n${rawCode}\n})()`;
+    const script = _gvcBundleTrustedPolicy ? _gvcBundleTrustedPolicy.createScript(code) : code;
+    return eval(script);
   }
 
   // ../../.gemini/antigravity-ide/brain/3fbc35a9-cb64-4749-8d18-cc467a354ca8/scratch/node_modules/youtubei.js/dist/src/core/Actions.js
