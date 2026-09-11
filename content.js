@@ -2191,26 +2191,63 @@ function handlePortMessage(msg) {
 
     const display = el('gvc-vid-display');
     if (display) {
-      display.innerHTML = `
-        <div style="font-size:12px;color:#f4212e;font-weight:700;">
-          ❌ Download Failed: ${esc(msg.message)}
-        </div>
-        <div style="font-size:11px;color:#71767b;margin-top:4px;margin-bottom:6px;">
-          Direct download was blocked by the CDN. Click below to capture and summarize directly:
-        </div>
-        <button id="gvc-record-fallback-btn" class="gvc-record-btn" style="width:100%;padding:9px;font-size:12px;font-weight:700;background:#1d9bf0;color:#fff;border-radius:6px;border:none;cursor:pointer;">
-          🔴 Capture & Summarize Video from Screen
-        </button>
-        <button id="gvc-retry-fetch-btn" class="gvc-link-btn" style="width:100%;margin-top:8px;padding:8px;font-size:11px;text-align:center;">
-          🔄 Back to Stream Options
-        </button>
-      `;
-      const recBtn = el('gvc-record-fallback-btn');
-      if (recBtn) {
-        recBtn.onclick = () => {
-          const target = lastTargetVideoEl || findActiveVideo();
-          recordVideoStream(target, 30);
-        };
+      const isAgeRestricted = msg.message && (msg.message.includes('Age-Restricted') || msg.message.includes('LOGIN_REQUIRED') || msg.message.includes('sign-in') || msg.message.includes('inappropriate'));
+      const isYt = !!currentYouTubeData;
+
+      if (isYt && isAgeRestricted) {
+        display.innerHTML = `
+          <div style="font-size:12px;color:#f4212e;font-weight:700;">
+            ⚠️ Age-Restricted / Sign-In Required
+          </div>
+          <div style="font-size:11px;color:#cfd9de;margin-top:4px;margin-bottom:8px;">
+            ${esc(msg.message)}
+          </div>
+          <button id="gvc-switch-mode1-btn" class="gvc-record-btn" style="width:100%;padding:9px;font-size:12px;font-weight:700;background:#1d9bf0;color:#fff;border-radius:6px;border:none;cursor:pointer;">
+            🚀 Switch to Cloud Direct (Mode 1) & Summarize
+          </button>
+          <button id="gvc-record-fallback-btn" class="gvc-link-btn" style="width:100%;margin-top:6px;padding:7px;font-size:11px;text-align:center;">
+            🎥 Or Record from Screen
+          </button>
+        `;
+        const switchBtn = el('gvc-switch-mode1-btn');
+        if (switchBtn) {
+          switchBtn.onclick = () => {
+            currentYouTubeMode = 1;
+            userPreferredYouTubeMode = 1;
+            store.set({ gvc_yt_preferred_mode: 1 });
+            renderYouTubeView(currentYouTubeData);
+            triggerAnalysis();
+          };
+        }
+        const recBtn = el('gvc-record-fallback-btn');
+        if (recBtn) {
+          recBtn.onclick = () => {
+            const target = lastTargetVideoEl || findActiveVideo();
+            recordVideoStream(target, 30);
+          };
+        }
+      } else {
+        display.innerHTML = `
+          <div style="font-size:12px;color:#f4212e;font-weight:700;">
+            ❌ Download Failed: ${esc(msg.message)}
+          </div>
+          <div style="font-size:11px;color:#71767b;margin-top:4px;margin-bottom:6px;">
+            Direct download was blocked by the CDN. Click below to capture and summarize directly:
+          </div>
+          <button id="gvc-record-fallback-btn" class="gvc-record-btn" style="width:100%;padding:9px;font-size:12px;font-weight:700;background:#1d9bf0;color:#fff;border-radius:6px;border:none;cursor:pointer;">
+            🔴 Capture & Summarize Video from Screen
+          </button>
+          <button id="gvc-retry-fetch-btn" class="gvc-link-btn" style="width:100%;margin-top:8px;padding:8px;font-size:11px;text-align:center;">
+            🔄 Back to Stream Options
+          </button>
+        `;
+        const recBtn = el('gvc-record-fallback-btn');
+        if (recBtn) {
+          recBtn.onclick = () => {
+            const target = lastTargetVideoEl || findActiveVideo();
+            recordVideoStream(target, 30);
+          };
+        }
       }
     }
 

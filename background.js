@@ -2069,6 +2069,10 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     }
 
     if (!selectedFormat || !selectedFormat.url) {
+      if (info.playability_status?.status === 'LOGIN_REQUIRED' || info.playability_status?.reason?.includes('inappropriate') || info.playability_status?.reason?.includes('age')) {
+        const reason = info.playability_status.reason || 'This video is age-restricted or requires sign-in.';
+        throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
+      }
       throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct) for instant zero-bandwidth analysis.');
     }
 
