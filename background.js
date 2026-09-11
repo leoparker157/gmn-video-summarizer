@@ -699,9 +699,9 @@ async function getYouTubeAuthCookies() {
     }
 
     const hasAuth = cookieMap.has('SID') || cookieMap.has('LOGIN_INFO') || cookieMap.has('SAPISID');
-    console.log([GVC Cookies] Retrieved  cookies across stores (Authenticated: ));
+    console.log('[GVC Cookies] Retrieved ' + cookieMap.size + ' cookies across stores (Authenticated: ' + hasAuth + ')');
 
-    return Array.from(cookieMap.entries()).map(([k, v]) => ${k}=).join('; ');
+    return Array.from(cookieMap.entries()).map(([k, v]) => k + '=' + v).join('; ');
   } catch (err) {
     console.warn('[GVC Cookies] Failed to retrieve cookies:', err);
     return '';
