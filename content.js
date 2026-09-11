@@ -6662,7 +6662,8 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
       queryId: qId,
       videoId: currentYouTubeData.videoId,
       quality: '360p',
-      mediaType: 'video'
+      mediaType: 'video',
+      cookies: document.cookie || ''
     }, '*');
 
     // Robust 12s fallback to background YouTube.js if main world doesn't answer
@@ -7256,7 +7257,8 @@ async function handleMainActionClick() {
             queryId: qId,
             videoId: currentYouTubeData.videoId,
             quality: '360p',
-            mediaType: 'video'
+            mediaType: 'video',
+            cookies: document.cookie || ''
           }, '*');
 
           // Fallback to background resolution if main_world doesn't respond
@@ -7908,6 +7910,81 @@ try {
     } catch (err) {
       sendResponse({ ok: false, error: err.message });
     }
+    return true;
+  }
+
+  if (msg.type === 'START_TAB_STREAM_DOWNLOAD') {
+    const { streamUrl, expectedTotalLength } = msg;
+    (async () => {
+      try {
+        const res = await fetch(streamUrl, {
+          credentials: 'include',
+          headers: {
+            'accept': '*/*',
+            'Range': 'bytes=0-'
+          }
+        });
+        if (!res.ok && res.status !== 206) {
+          throw new Error(`Tab fetch failed: HTTP ${res.status}`);
+        }
+
+        const headerLen = res.headers.get('content-length');
+        const total = expectedTotalLength || (headerLen ? parseInt(headerLen, 10) : 0);
+
+        const reader = res.body.getReader();
+        let buffer = [];
+        let bufferBytes = 0;
+        const FLUSH_THRESHOLD = 1024 * 1024; // 1 MB buffer for fast, low-overhead IPC
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer.push(value);
+          bufferBytes += value.length;
+
+          if (bufferBytes >= FLUSH_THRESHOLD) {
+            const merged = new Uint8Array(bufferBytes);
+            let offset = 0;
+            for (const b of buffer) {
+              merged.set(b, offset);
+              offset += b.length;
+            }
+            chrome.runtime.sendMessage({
+              type: 'TAB_STREAM_CHUNK',
+              chunk: merged.buffer,
+              total
+            }).catch(() => {});
+            buffer = [];
+            bufferBytes = 0;
+          }
+        }
+
+        if (bufferBytes > 0) {
+          const merged = new Uint8Array(bufferBytes);
+          let offset = 0;
+          for (const b of buffer) {
+            merged.set(b, offset);
+            offset += b.length;
+          }
+          chrome.runtime.sendMessage({
+            type: 'TAB_STREAM_CHUNK',
+            chunk: merged.buffer,
+            total
+          }).catch(() => {});
+        }
+
+        chrome.runtime.sendMessage({
+          type: 'TAB_STREAM_DONE',
+          mimeType: res.headers.get('content-type') || 'video/mp4'
+        }).catch(() => {});
+      } catch (err) {
+        chrome.runtime.sendMessage({
+          type: 'TAB_STREAM_ERROR',
+          error: err.message
+        }).catch(() => {});
+      }
+    })();
+    sendResponse({ started: true });
     return true;
   }
 

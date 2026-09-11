@@ -848,67 +848,63 @@
             }
           }
 
-          // 1a. If active tab is already playing the video, instantly sniff the stream from performance entries (<1ms latency!)
-          try {
-            const resEntries = (window.performance && typeof window.performance.getEntriesByType === 'function')
-              ? window.performance.getEntriesByType('resource')
-              : [];
-            const gvEntries = (resEntries || []).filter(r => r.name && r.name.includes('googlevideo.com/videoplayback'));
-            if (gvEntries.length > 0) {
-              for (let i = gvEntries.length - 1; i >= 0; i--) {
-                const entryUrl = gvEntries[i].name;
-                try {
-                  const u = new URL(entryUrl);
-                  u.searchParams.delete('range');
-                  u.searchParams.delete('rn');
-                  u.searchParams.delete('sq');
-                  const streamUrl = u.toString();
-                  const itag = parseInt(u.searchParams.get('itag'), 10) || 18;
-                  const isAudio = itag === 140 || itag === 251 || itag === 250 || itag === 249;
-                  formats.unshift({
-                    itag,
-                    url: streamUrl,
-                    quality_label: itag === 18 ? '360p' : (itag === 22 ? '720p' : (itag === 136 ? '720p' : (itag === 137 ? '1080p' : 'Auto'))),
-                    has_video: !isAudio,
-                    has_audio: itag === 18 || itag === 22 || isAudio
-                  });
-                } catch (_) {}
-              }
-            }
-          } catch (_) {}
+          // 1a. Decipher any in-page formats that have signatureCipher
+          const hasUndeciphered = formats.some(f => !f.url && (f.signatureCipher || f.signature_cipher || f.cipher));
+          if (hasUndeciphered && InnertubeClass) {
+            try {
+              const activeCookie = passedCookies || document.cookie || undefined;
+              const ytDec = await InnertubeClass.create({
+                client_type: 'WEB',
+                cookie: activeCookie
+              });
+              const player = ytDec.session?.player;
 
-          // 1b. If in-page formats exist from active authorized session and lack direct urls, decipher their signatureCipher
-          if (formats.length > 0 && !formats.some(f => f.url)) {
-            let player = null;
-            if (InnertubeClass) {
-              try {
-                const ytDec = await InnertubeClass.create({ generate_session_locally: true });
-                player = ytDec.session?.player;
-              } catch (_) {}
-            }
-
-            for (const f of formats) {
-              if (!f.url) {
-                const cipher = f.signatureCipher || f.signature_cipher || f.cipher;
-                if (cipher) {
-                  try {
-                    if (player && typeof player.decipher === 'function') {
+              for (const f of formats) {
+                if (!f.url) {
+                  const cipher = f.signatureCipher || f.signature_cipher || f.cipher;
+                  if (cipher && player && typeof player.decipher === 'function') {
+                    try {
                       f.url = await player.decipher(cipher);
-                    } else {
-                      const params = new URLSearchParams(cipher);
-                      const rawUrl = params.get('url');
-                      const s = params.get('s');
-                      const sp = params.get('sp') || 'sig';
-                      if (rawUrl) {
-                        f.url = s ? `${rawUrl}&${sp}=${encodeURIComponent(s)}` : rawUrl;
-                      }
+                    } catch (e) {
+                      console.warn('[GVC Main] Error deciphering in-page format:', e);
                     }
-                  } catch (e) {
-                    console.warn('[GVC Main] Error deciphering in-page format:', e);
                   }
                 }
               }
+            } catch (e) {
+              console.warn('[GVC Main] Failed to initialize Innertube for deciphering:', e);
             }
+          }
+
+          // 1b. If no working stream found yet, sniff playing stream from active performance entries as fallback
+          if (!formats.some(f => f.url && f.has_audio)) {
+            try {
+              const resEntries = (window.performance && typeof window.performance.getEntriesByType === 'function')
+                ? window.performance.getEntriesByType('resource')
+                : [];
+              const gvEntries = (resEntries || []).filter(r => r.name && r.name.includes('googlevideo.com/videoplayback'));
+              if (gvEntries.length > 0) {
+                for (let i = gvEntries.length - 1; i >= 0; i--) {
+                  const entryUrl = gvEntries[i].name;
+                  try {
+                    const u = new URL(entryUrl);
+                    u.searchParams.delete('range');
+                    u.searchParams.delete('rn');
+                    u.searchParams.delete('sq');
+                    const streamUrl = u.toString();
+                    const itag = parseInt(u.searchParams.get('itag'), 10) || 18;
+                    const isAudio = itag === 140 || itag === 251 || itag === 250 || itag === 249;
+                    formats.push({
+                      itag,
+                      url: streamUrl,
+                      quality_label: itag === 18 ? '360p' : (itag === 22 ? '720p' : (itag === 136 ? '720p' : (itag === 137 ? '1080p' : 'Auto'))),
+                      has_video: !isAudio,
+                      has_audio: itag === 18 || itag === 22 || isAudio
+                    });
+                  } catch (_) {}
+                }
+              }
+            } catch (_) {}
           }
 
           // 2. If in-page formats not available or lack direct urls, resolve via Innertube waterfall with cookies
@@ -996,8 +992,16 @@
             throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
           }
 
-          const cpn = info?.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-          const streamUrl = `${selectedFormat.url}&cpn=${cpn}`;
+          let streamUrl = selectedFormat.url;
+          try {
+            const u = new URL(streamUrl);
+            if (!u.searchParams.has('cpn')) {
+              const cpn = info?.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+              u.searchParams.set('cpn', cpn);
+            }
+            streamUrl = u.toString();
+          } catch (_) {}
+
           const totalLength = parseInt(selectedFormat.content_length, 10) || 0;
           const actualQuality = selectedFormat.quality_label || (selectedFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
           const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
