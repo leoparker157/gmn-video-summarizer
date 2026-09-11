@@ -6,7 +6,17 @@
 (async () => {
 'use strict';
 
-if (window.location.hostname === 'accounts.youtube.com') return;
+const isYtSite = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
+if (isYtSite) {
+  // STRICT GUARD: On YouTube, ONLY run in the top-level window of www.youtube.com.
+  // NEVER run inside sub-frames, RotateCookiesPage, live chat, or embed iframes.
+  if (window.self !== window.top ||
+      window.location.hostname === 'accounts.youtube.com' ||
+      window.location.pathname.startsWith('/live_chat') ||
+      window.location.pathname.startsWith('/embed')) {
+    return;
+  }
+}
 
 // ── Extension Context Invalidation Guard ──────────────────────────────────────
 function isExtensionValid() {
@@ -6703,17 +6713,15 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
         handled = true;
 
         if (!event.data.success || !event.data.streamUrl) {
-          console.warn('[GVC] Stream resolve via main_world failed, falling back to background YouTube.js:', event.data.error);
-          connectPort();
-          port.postMessage({
-            type: 'YOUTUBE_JS_DOWNLOAD',
-            videoId: currentYouTubeData.videoId,
-            mediaType: 'video',
-            quality: '360p',
-            label: currentYouTubeData.title,
-            autoUpload: true,
-            apiKey: apiKey
-          });
+          const errMsg = event.data.error || 'Unable to extract stream from YouTube player. Please ensure video is playing and click Summarize again.';
+          console.warn('[GVC] Stream resolve via main_world failed:', errMsg);
+          isDownloading = false;
+          isProcessing = false;
+          updateActionButtonState();
+          const elOut = el('gvc-out');
+          if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
+          const disp = el('gvc-vid-display');
+          if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
           return;
         }
 
@@ -6744,24 +6752,21 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
       mediaType: 'video'
     }, '*');
 
-    // Robust 6.0s fallback to background YouTube.js if main world doesn't answer
     fallbackTimer = setTimeout(() => {
       if (!handled) {
         handled = true;
         window.removeEventListener('message', streamResolvedHandler);
-        console.log('[GVC] Main world stream resolve timed out after 6s, falling back to background YouTube.js');
-        connectPort();
-        port.postMessage({
-          type: 'YOUTUBE_JS_DOWNLOAD',
-          videoId: currentYouTubeData.videoId,
-          mediaType: 'video',
-          quality: '360p',
-          label: currentYouTubeData.title,
-          autoUpload: true,
-          apiKey: apiKey
-        });
+        console.warn('[GVC] Main world stream resolve timed out');
+        isDownloading = false;
+        isProcessing = false;
+        updateActionButtonState();
+        const errMsg = 'YouTube player took too long to respond. Please ensure the video is playing and click Summarize again.';
+        const elOut = el('gvc-out');
+        if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
+        const disp = el('gvc-vid-display');
+        if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
       }
-    }, 2500);
+    }, 4000);
 
     return;
   }
@@ -7295,15 +7300,14 @@ async function handleMainActionClick() {
               handled = true;
 
               if (!event.data.success || !event.data.streamUrl) {
-                // Main-world stream resolution fallback to background
-                connectPort();
-                port.postMessage({
-                  type: 'YOUTUBE_JS_DOWNLOAD',
-                  videoId: currentYouTubeData.videoId,
-                  mediaType: 'video',
-                  quality: '360p',
-                  label: currentYouTubeData.title
-                });
+                const errMsg = event.data.error || 'Unable to extract stream from YouTube player. Please ensure video is playing and click Summarize again.';
+                console.warn('[GVC] Stream resolve via main_world failed:', errMsg);
+                isDownloading = false;
+                isProcessing = false;
+                updateActionButtonState();
+                if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
+                const disp = el('gvc-vid-display');
+                if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
                 return;
               }
 
@@ -7338,20 +7342,19 @@ async function handleMainActionClick() {
             mediaType: 'video'
           }, '*');
 
-          // Fallback to background resolution if main_world doesn't respond
           setTimeout(() => {
             if (!handled) {
               window.removeEventListener('message', streamResolvedHandler);
-              connectPort();
-              port.postMessage({
-                type: 'YOUTUBE_JS_DOWNLOAD',
-                videoId: currentYouTubeData.videoId,
-                mediaType: 'video',
-                quality: '360p',
-                label: currentYouTubeData.title
-              });
+              console.warn('[GVC] Main world stream resolve timed out');
+              isDownloading = false;
+              isProcessing = false;
+              updateActionButtonState();
+              const errMsg = 'YouTube player took too long to respond. Please ensure the video is playing and click Summarize again.';
+              if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
+              const disp = el('gvc-vid-display');
+              if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
             }
-          }, 6000);
+          }, 4000);
           return;
         }
       }
@@ -7941,41 +7944,8 @@ try {
   }
 
   if (msg.type === 'TAB_FETCH') {
-    const { url, method = 'GET', headers = {}, body } = msg;
-    const cleanHeaders = {};
-    for (const [k, v] of Object.entries(headers)) {
-      const lower = k.toLowerCase();
-      if (lower === 'origin' || lower === 'referer' || lower === 'user-agent' || lower === 'host' || lower === 'content-length') {
-        continue;
-      }
-      cleanHeaders[k] = v;
-    }
-
-    const opts = {
-      method,
-      headers: cleanHeaders,
-      credentials: 'include'
-    };
-    if (body && method !== 'GET' && method !== 'HEAD') {
-      opts.body = body;
-    }
-
-    fetch(url, opts)
-      .then(async (res) => {
-        const text = await res.text();
-        const resHeaders = {};
-        res.headers.forEach((val, key) => { resHeaders[key] = val; });
-        sendResponse({
-          ok: res.ok,
-          status: res.status,
-          statusText: res.statusText,
-          headers: resHeaders,
-          text
-        });
-      })
-      .catch((err) => {
-        sendResponse({ ok: false, status: 0, statusText: err.message, error: err.message });
-      });
+    // TAB_FETCH disabled to protect authentication cookies and session state
+    sendResponse({ ok: false, status: 403, statusText: 'TAB_FETCH disabled to protect authentication cookies', error: 'TAB_FETCH disabled' });
     return true;
   }
 

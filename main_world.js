@@ -4,8 +4,10 @@
  */
 (function() {
   'use strict';
-
-  if (window.location.hostname === 'accounts.youtube.com') return;
+  const isYouTube = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
+  if (isYouTube && (window.self !== window.top || window.location.hostname !== 'www.youtube.com' || window.location.pathname.startsWith('/live_chat') || window.location.pathname.startsWith('/embed') || window.location.hostname === 'accounts.youtube.com')) {
+    return;
+  }
   if (window.__GVC_MAIN_WORLD_INJECTED__) return;
   window.__GVC_MAIN_WORLD_INJECTED__ = true;
 
@@ -49,42 +51,31 @@
           const oldestKey = VIDEO_CACHE.keys().next().value;
           VIDEO_CACHE.delete(oldestKey);
         }
-        VIDEO_CACHE.set(String(tweetId), videoInfo);
+        VIDEO_CACHE.set(tweetId, videoInfo);
       }
 
-      // Continue traversing
-      if (Array.isArray(node)) {
-        for (let i = 0; i < node.length; i++) {
-          walk(node[i], restId, depth + 1);
-        }
-      } else {
-        const keys = Object.keys(node);
-        for (let i = 0; i < keys.length; i++) {
-          const val = node[keys[i]];
-          if (val && typeof val === 'object') {
-            walk(val, restId, depth + 1);
-          }
-        }
+      for (const key of Object.keys(node)) {
+        walk(node[key], tweetId, depth + 1);
       }
     }
 
-    try { walk(json, null, 0); } catch (_) {}
+    try {
+      walk(json, null, 0);
+    } catch (_) {}
   }
 
   const isTwitter = window.location.hostname.includes('twitter.com') || window.location.hostname.includes('x.com');
 
-  // ── Universal HLS.js Interceptor ─────────────────────────────────────────────
+  // ── Hook HLS.js attachMedia to Capture Master Manifests ─────────────────────
   function hookHls(HlsClass) {
-    if (!HlsClass || HlsClass.__gvcHooked) return;
-    HlsClass.__gvcHooked = true;
+    if (!HlsClass || !HlsClass.prototype || HlsClass.prototype._gvcHooked) return;
+    HlsClass.prototype._gvcHooked = true;
 
     const origLoadSource = HlsClass.prototype.loadSource;
     if (typeof origLoadSource === 'function') {
       HlsClass.prototype.loadSource = function(url) {
         if (url && typeof url === 'string') {
           M3U8_CACHE.set(url, { url, time: Date.now() });
-          this.__gvc_m3u8 = url;
-          if (this.media) this.media.__gvc_m3u8 = url;
           window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
         }
         return origLoadSource.apply(this, arguments);
@@ -94,92 +85,83 @@
     const origAttachMedia = HlsClass.prototype.attachMedia;
     if (typeof origAttachMedia === 'function') {
       HlsClass.prototype.attachMedia = function(media) {
-        if (media) {
-          media.__gvc_hls = this;
-          if (this.__gvc_m3u8) media.__gvc_m3u8 = this.__gvc_m3u8;
+        if (this.url) {
+          M3U8_CACHE.set(this.url, { url: this.url, time: Date.now() });
+          window.postMessage({ type: 'GVC_M3U8_CAPTURED', url: this.url }, '*');
         }
         return origAttachMedia.apply(this, arguments);
       };
     }
   }
 
-  try {
-    let _Hls = window.Hls;
-    if (_Hls) {
-      hookHls(_Hls);
-    } else {
-      Object.defineProperty(window, 'Hls', {
-        configurable: true,
-        enumerable: true,
-        get() { return _Hls; },
-        set(val) {
-          _Hls = val;
-          try { hookHls(val); } catch (_) {}
-        }
-      });
-    }
-  } catch (_) {}
+  if (!isYouTube) {
+    try {
+      let _Hls = window.Hls;
+      if (_Hls) {
+        hookHls(_Hls);
+      } else {
+        Object.defineProperty(window, 'Hls', {
+          configurable: true,
+          enumerable: true,
+          get() { return _Hls; },
+          set(val) {
+            _Hls = val;
+            try { hookHls(val); } catch (_) {}
+          }
+        });
+      }
+    } catch (_) {}
+  }
 
   // ── Hook Fetch & XMLHttpRequest for Playlists & Twitter GraphQL ─────────────
-  try {
-    const origFetch = window.fetch;
-    window.fetch = function(...args) {
-      const p = origFetch.apply(this, args);
-      try {
-        const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
-        if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
-          M3U8_CACHE.set(url, { url, time: Date.now() });
-          window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
-        } else if (url && url.includes('/youtubei/v1/player')) {
-          // Intercept YouTube's own player API response to cache authenticated streamingData
-          p.then(res => {
-            res.clone().json().then(json => {
-              if (json && json.streamingData) {
-                window.__GVC_LAST_PLAYER_RESPONSE__ = json;
-                window.__GVC_LAST_PLAYER_RESPONSE_TIME__ = Date.now();
-              }
-            }).catch(() => {});
-          }).catch(() => {});
-        } else if (isTwitter && url && (url.includes('/graphql/') || url.includes('/i/api/'))) {
-          p.then(res => {
-            res.clone().json().then(harvestVideos).catch(() => {});
-          }).catch(() => {});
-        }
-      } catch (_) {}
-      return p;
-    };
-
-    const origOpen = XMLHttpRequest.prototype.open;
-    const origSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function(...args) {
-      this._gvcUrl = args[1];
-      try {
-        const url = args[1];
-        if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
-          M3U8_CACHE.set(url, { url, time: Date.now() });
-          window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
-        }
-      } catch (_) {}
-      return origOpen.apply(this, args);
-    };
-    XMLHttpRequest.prototype.send = function(...args) {
-      this.addEventListener('load', function() {
+  // STRICT GUARD: NEVER hook fetch or XMLHttpRequest on YouTube!
+  // YouTube relies on delicate authentication and cookie rotation handshakes (RotateCookies, live chat).
+  // Hooking window.fetch on YouTube breaks internal session sync and causes random logouts.
+  if (!isYouTube) {
+    try {
+      const origFetch = window.fetch;
+      window.fetch = function(...args) {
+        const p = origFetch.apply(this, args);
         try {
-          if (this._gvcUrl && this._gvcUrl.includes('/youtubei/v1/player')) {
-            const json = JSON.parse(this.responseText);
-            if (json && json.streamingData) {
-              window.__GVC_LAST_PLAYER_RESPONSE__ = json;
-              window.__GVC_LAST_PLAYER_RESPONSE_TIME__ = Date.now();
-            }
-          } else if (isTwitter && this._gvcUrl && (this._gvcUrl.includes('/graphql/') || this._gvcUrl.includes('/i/api/'))) {
-            const json = JSON.parse(this.responseText);
-            harvestVideos(json);
+          const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
+          if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
+            M3U8_CACHE.set(url, { url, time: Date.now() });
+            window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
+          } else if (isTwitter && url && (url.includes('/graphql/') || url.includes('/i/api/'))) {
+            p.then(res => {
+              res.clone().json().then(harvestVideos).catch(() => {});
+            }).catch(() => {});
           }
         } catch (_) {}
-      });
-      return origSend.apply(this, args);
-    };
-  } catch (_) {}
+        return p;
+      };
+
+      const origOpen = XMLHttpRequest.prototype.open;
+      const origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(...args) {
+        this._gvcUrl = args[1];
+        try {
+          const url = args[1];
+          if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
+            M3U8_CACHE.set(url, { url, time: Date.now() });
+            window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
+          }
+        } catch (_) {}
+        return origOpen.apply(this, args);
+      };
+      XMLHttpRequest.prototype.send = function(...args) {
+        this.addEventListener('load', function() {
+          try {
+            if (isTwitter && this._gvcUrl && (this._gvcUrl.includes('/graphql/') || this._gvcUrl.includes('/i/api/'))) {
+              const json = JSON.parse(this.responseText);
+              harvestVideos(json);
+            }
+          } catch (_) {}
+        });
+        return origSend.apply(this, args);
+      };
+    } catch (_) {}
+  }
 
   // ── High-Performance Cyclic Safe Video Extractor ──────────────────────────────
   function extractVideosFromObject(root) {
@@ -949,23 +931,29 @@
             const cipherStr = playerFormat.signatureCipher || playerFormat.cipher;
 
             // Decipher signatureCipher and/or transform the 'n' challenge parameter
-            console.log('[GVC] Player format found, running decipher/n-transform with Innertube Player engine...');
+            console.log('[GVC] Player format found, running decipher/n-transform with Player engine...');
             try {
               ensureInnertubeTrustedEvaluator();
-              let InnertubeClass = window.Innertube || globalThis.Innertube;
-              if (!InnertubeClass) {
-                for (let i = 0; i < 30; i++) {
-                  await new Promise(r => setTimeout(r, 100));
-                  InnertubeClass = window.Innertube || globalThis.Innertube;
-                  if (InnertubeClass) break;
+              const YouTubeJS = window.YouTubeJS || globalThis.YouTubeJS;
+              const PlayerClass = YouTubeJS?.Player;
+              if (PlayerClass) {
+                if (!window.__GVC_PLAYER_ENGINE__) {
+                  let playerId = null;
+                  try {
+                    if (typeof window.ytcfg !== 'undefined' && typeof window.ytcfg.get === 'function') {
+                      playerId = window.ytcfg.get('PLAYER_VFL_IDENTIFIER') || null;
+                    }
+                    if (!playerId) {
+                      const baseScript = document.querySelector('script[src*="/base.js"], script[src*="player_es6"]');
+                      if (baseScript && baseScript.src) {
+                        const m = baseScript.src.match(/player\/([a-zA-Z0-9_-]+)\//);
+                        if (m) playerId = m[1];
+                      }
+                    }
+                  } catch (_) {}
+                  window.__GVC_PLAYER_ENGINE__ = await PlayerClass.create(null, undefined, undefined, playerId || undefined);
                 }
-              }
-              if (InnertubeClass) {
-                ensureInnertubeTrustedEvaluator();
-                if (!window.__GVC_INNERTUBE_SESSION__) {
-                  window.__GVC_INNERTUBE_SESSION__ = await InnertubeClass.create();
-                }
-                const playerEngine = window.__GVC_INNERTUBE_SESSION__?.session?.player;
+                const playerEngine = window.__GVC_PLAYER_ENGINE__;
                 if (playerEngine && typeof playerEngine.decipher === 'function') {
                   const targetToDecipher = streamUrl || cipherStr;
                   const deciphered = await playerEngine.decipher(targetToDecipher, cipherStr);
@@ -1010,105 +998,9 @@
             }
           }
 
-          // ── Fallback: Innertube with WEB client (uses page cookies for auth) ──
-          console.log('[GVC] Page player had no usable streams, falling back to Innertube WEB client...');
-          ensureInnertubeTrustedEvaluator();
-          let InnertubeClass = window.Innertube || globalThis.Innertube;
-          if (!InnertubeClass) {
-            for (let i = 0; i < 30; i++) {
-              await new Promise(r => setTimeout(r, 100));
-              InnertubeClass = window.Innertube || globalThis.Innertube;
-              if (InnertubeClass) break;
-            }
-          }
-          if (!InnertubeClass) {
-            throw new Error('YouTube.js engine not loaded in page');
-          }
-          ensureInnertubeTrustedEvaluator();
-          const yt = window.__GVC_INNERTUBE_SESSION__ || (window.__GVC_INNERTUBE_SESSION__ = await InnertubeClass.create());
-          const info = await yt.getBasicInfo(videoId);
-          const formats = (info.streaming_data?.formats || []).concat(info.streaming_data?.adaptive_formats || []);
-
-          let selectedFormat = null;
-          const hasAny = (f) => !!(f.url || f.signature_cipher || f.cipher);
-
-          if (!isAudioOnly) {
-            if (quality === '1080p') {
-              selectedFormat = formats.find(f => f.quality_label?.includes('1080') && hasAny(f));
-            } else if (quality === '720p') {
-              selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && hasAny(f));
-            } else if (quality === '480p') {
-              selectedFormat = formats.find(f => f.quality_label?.includes('480') && hasAny(f));
-            } else if (quality === '360p') {
-              selectedFormat = formats.find(f => f.itag === 18 && hasAny(f));
-            }
-
-            // Fallback hierarchy if requested resolution lacks a direct combined stream
-            if (!selectedFormat) {
-              if (quality === '720p' || quality === '480p' || quality === '1080p') {
-                selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && hasAny(f));
-              }
-              if (!selectedFormat) {
-                selectedFormat = formats.find(f => f.itag === 18 && hasAny(f)) ||
-                                 formats.find(f => (f.itag === 18 || f.itag === 22) && hasAny(f)) ||
-                                 formats.find(f => f.has_video && hasAny(f));
-              }
-            }
-          } else {
-            selectedFormat = formats.find(f => f.has_audio && !f.has_video && hasAny(f)) ||
-                             formats.find(f => f.itag === 18 && hasAny(f));
-          }
-
-          if (selectedFormat) {
-            try {
-              ensureInnertubeTrustedEvaluator();
-              selectedFormat.url = await selectedFormat.decipher(yt.session.player);
-              console.log('[GVC] Fallback format deciphered with Innertube!');
-            } catch (decErr) {
-              console.warn('[GVC] Fallback format decipher error:', decErr);
-            }
-          }
-
-          if (!selectedFormat || !selectedFormat.url) {
-            if (info?.playability_status?.status === 'LOGIN_REQUIRED' || info?.playability_status?.reason?.includes('inappropriate') || info?.playability_status?.reason?.includes('age')) {
-              const reason = info.playability_status.reason || 'This video is age-restricted or requires sign-in.';
-              throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
-            }
-            throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
-          }
-
-          let streamUrl = selectedFormat.url;
-          if (!streamUrl.includes('cpn=')) {
-            const playerCpn = (() => {
-              try {
-                const mp = document.getElementById('movie_player');
-                return (mp && typeof mp.getClientPlaybackNonce === 'function') ? mp.getClientPlaybackNonce() : null;
-              } catch (_) { return null; }
-            })();
-            const cpn = playerCpn || info.cpn || null;
-            if (cpn) {
-              streamUrl += (streamUrl.includes('?') ? '&' : '?') + 'cpn=' + cpn;
-            }
-          }
-          const totalLength = parseInt(selectedFormat.content_length, 10) || 0;
-          const actualQuality = selectedFormat.quality_label || (selectedFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
-          const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
-          const videoTitle = info.basic_info?.title || document.title.replace(' - YouTube', '');
-
-          window.postMessage({
-            type: 'GVC_RESOLVE_YOUTUBE_STREAM_RES',
-            queryId,
-            success: true,
-            streamUrl,
-            totalLength,
-            actualQuality,
-            requestedQuality: quality,
-            isQualityFallback,
-            videoTitle,
-            itag: selectedFormat.itag,
-            source: 'innertube'
-          }, '*');
+          throw new Error('Unable to extract authenticated stream from YouTube player. Please ensure video is playing and click Retry.');
         } catch (err) {
+          console.error('[GVC] Failed to resolve YouTube stream:', err);
           window.postMessage({
             type: 'GVC_RESOLVE_YOUTUBE_STREAM_RES',
             queryId,
@@ -1120,17 +1012,7 @@
     }
   });
 
-  // Periodically detect YouTube video changes (SPA navigation)
-  if (window.location.hostname.includes('youtube.com')) {
-    let lastYtVideoId = null;
-    setInterval(() => {
-      const ytData = probeYouTube();
-      if (ytData && ytData.videoId !== lastYtVideoId) {
-        lastYtVideoId = ytData.videoId;
-        window.postMessage({ type: 'GVC_YOUTUBE_DATA_AUTO', data: ytData }, '*');
-      }
-    }, 1500);
-  }
+
 
 })();
 

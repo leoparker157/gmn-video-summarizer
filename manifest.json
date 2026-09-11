@@ -20,12 +20,18 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://*.youtube.com/*"],
+      "matches": ["*://www.youtube.com/*"],
+      "exclude_matches": [
+        "*://accounts.youtube.com/*",
+        "*://*.youtube.com/live_chat*",
+        "*://*.youtube.com/live_chat_replay*",
+        "*://*.youtube.com/embed/*"
+      ],
       "js": ["youtubei.bundle.js", "main_world.js"],
       "run_at": "document_start",
       "world": "MAIN",
-      "all_frames": true,
-      "match_about_blank": true
+      "all_frames": false,
+      "match_about_blank": false
     },
     {
       "matches": ["<all_urls>"],
@@ -38,6 +44,12 @@
     },
     {
       "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "*://accounts.youtube.com/*",
+        "*://*.youtube.com/live_chat*",
+        "*://*.youtube.com/live_chat_replay*",
+        "*://*.youtube.com/embed/*"
+      ],
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle",
