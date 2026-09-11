@@ -20,7 +20,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://www.youtube.com/*"],
+      "matches": ["*://*.youtube.com/*", "*://youtube.com/*"],
       "exclude_matches": [
         "*://accounts.youtube.com/*",
         "*://*.youtube.com/live_chat*",
@@ -35,7 +35,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "exclude_matches": ["*://*.youtube.com/*"],
+      "exclude_matches": ["*://*.youtube.com/*", "*://youtube.com/*"],
       "js": ["main_world.js"],
       "run_at": "document_start",
       "world": "MAIN",

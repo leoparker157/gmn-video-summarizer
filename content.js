@@ -7538,6 +7538,12 @@ function findActiveVideo() {
 function getBadgeContainer(video) {
   if (!video) return null;
 
+  const isYt = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
+  if (isYt) {
+    const ytPlayer = video.closest('#movie_player, .html5-video-player') || document.getElementById('movie_player');
+    if (ytPlayer) return ytPlayer;
+  }
+
   // Dedicated high-precision selectors for Twitter / X
   if (isTwitter) {
     return video.closest('[data-testid="videoComponent"]') ||
@@ -7548,18 +7554,20 @@ function getBadgeContainer(video) {
   }
 
   if (!isTopFrame) {
-    return document.body || document.documentElement;
+    const p = video.closest('.html5-video-player, .video-js, .plyr, .dplayer, .jwplayer') || video.parentElement;
+    return p || document.body || document.documentElement;
   }
 
-  const wrapper = video.closest('[data-video-id]') ||
-                  video.closest('[data-testid="videoComponent"]') ||
-                  video.closest('[data-testid="videoPlayer"]') ||
-                  video.closest('.html5-video-player') ||
+  const wrapper = video.closest('.html5-video-player') ||
+                  video.closest('#movie_player') ||
                   video.closest('.video-js') ||
                   video.closest('.plyr') ||
                   video.closest('.dplayer') ||
                   video.closest('.artplayer') ||
                   video.closest('.jwplayer') ||
+                  video.closest('[data-testid="videoComponent"]') ||
+                  video.closest('[data-testid="videoPlayer"]') ||
+                  video.closest('[data-video-id]') ||
                   video.closest('[data-e2e="feed-video"]') ||
                   video.closest('shreddit-player') ||
                   video.closest('#dz_video') ||
@@ -7705,7 +7713,7 @@ async function openAndExtract(vEl) {
 }
 
 const attachedVideoBadges = new WeakSet();
-const dismissedVideoBadges = new WeakSet();
+let dismissedVideoBadges = new WeakSet();
 
 function attachBadgeToVideo(video) {
   if (S.gic_v_show_video_badge === false) return;
@@ -7729,10 +7737,10 @@ function attachBadgeToVideo(video) {
   badge.className = 'gvc-vid-badge';
   badge.setAttribute('role', 'button');
   if (!isTopFrame) {
-    badge.style.position = 'fixed';
-    badge.style.top = '12px';
-    badge.style.right = '12px';
-    badge.style.zIndex = '2147483647';
+    badge.style.setProperty('position', 'fixed', 'important');
+    badge.style.setProperty('top', '12px', 'important');
+    badge.style.setProperty('right', '12px', 'important');
+    badge.style.setProperty('z-index', '2147483647', 'important');
   }
   const isYtInitial = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
   badge.innerHTML = `
@@ -7893,21 +7901,18 @@ function scanVideos() {
     return;
   }
 
-  // Only the top-level window manages player badges to guarantee zero duplicate icons across frames
-  if (!isTopFrame) {
-    return;
-  }
-
-  // 1. Scan direct <video> elements on the page (YouTube, Twitter, direct MP4, HTML5)
+  // 1. Scan direct <video> elements on the page (YouTube, Twitter, direct MP4, HTML5, or inside player iframes)
   const videos = findAllVideos();
   for (let i = 0; i < videos.length; i++) {
     attachBadgeToVideo(videos[i]);
   }
 
-  // 2. In top frame: Scan embed video iframes and player wrappers (7mmtv, Earnvids, Dood, Streamwish, etc.)
-  const videoIframes = findAllVideoIframes();
-  for (let i = 0; i < videoIframes.length; i++) {
-    attachBadgeToIframe(videoIframes[i]);
+  // 2. In top frame: Also scan embed video iframes and player wrappers (7mmtv, Earnvids, Dood, Streamwish, etc.)
+  if (isTopFrame) {
+    const videoIframes = findAllVideoIframes();
+    for (let i = 0; i < videoIframes.length; i++) {
+      attachBadgeToIframe(videoIframes[i]);
+    }
   }
 }
 
@@ -7915,9 +7920,28 @@ function scanVideos() {
 // lastContextVideo initialized at module top
 document.addEventListener('contextmenu', (e) => {
   const t = e.target;
-  if (t && t.tagName === 'VIDEO') { lastContextVideo = t; return; }
-  const near = t && t.closest ? t.closest('video') : null;
-  if (near) lastContextVideo = near;
+  if (t && t.closest && t.closest('#gvc-box')) return; // Never intercept context menu inside extension panel
+
+  let v = null;
+  if (t && t.tagName === 'VIDEO') {
+    v = t;
+  } else if (t && t.closest) {
+    v = t.closest('video') || t.closest('#movie_player, .html5-video-player, [data-video-id], .video-js, .plyr, .dplayer, .jwplayer')?.querySelector('video');
+  }
+  if (!v) v = findActiveVideo();
+  if (v) lastContextVideo = v;
+
+  // Direct right-click on video or video player overlay opens the summarizer panel!
+  // Unless user is holding Ctrl or Alt (for browser inspector)
+  const isPlayerClick = t && (t.tagName === 'VIDEO' || Boolean(t.closest && t.closest('#movie_player, .html5-video-player, .gvc-vid-badge, [data-testid="videoComponent"], .video-js, .plyr, .dplayer, .jwplayer')));
+  if (isPlayerClick && !e.ctrlKey && !e.altKey) {
+    if (!e.shiftKey) {
+      // Prevent default page context menu (e.g. YouTube "Stats for nerds")
+      try { e.preventDefault(); e.stopPropagation(); } catch (_) {}
+    }
+    const targetVideo = v || lastContextVideo || findActiveVideo();
+    openAndExtract(targetVideo);
+  }
 }, true);
 
 try {
@@ -8127,6 +8151,11 @@ function checkSpaUrlNavigation() {
     currentPendingUserMsgId = null;
     currentPendingUserQuery = '';
     currentPendingRetryModelId = null;
+
+    try {
+      dismissedVideoBadges = new WeakSet();
+      document.querySelectorAll('video').forEach(v => { v.__gvc_badge_dismissed = false; });
+    } catch (_) {}
 
     closeChatPane();
     const btnCont = el('gvc-btn-continue');

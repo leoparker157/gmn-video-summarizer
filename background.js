@@ -411,15 +411,24 @@ if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
 }
 
 // ── Context Menu ─────────────────────────────────────────────────────────────
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: "gvc-summarize-video",
-      title: "✨ Summarize / Caption This Video (Gemini)",
-      contexts: ["video", "all"]
+function ensureContextMenu() {
+  try {
+    if (!chrome.contextMenus) return;
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({
+        id: "gvc-summarize-video",
+        title: "✨ Summarize / Caption This Video (Gemini)",
+        contexts: ["video", "all"]
+      }, () => {
+        void chrome.runtime.lastError;
+      });
     });
-  });
-});
+  } catch (_) {}
+}
+
+chrome.runtime.onInstalled.addListener(ensureContextMenu);
+chrome.runtime.onStartup.addListener(ensureContextMenu);
+ensureContextMenu();
 
 // ── Forward Messages between Frames (e.g. Iframe Badge -> Top Frame Panel) ───
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
