@@ -71,6 +71,7 @@ let chatHistory = [];
 let chatPagination = {};
 let lastSummaryText = '';
 let lastSummaryPayload = null;
+let lastSummaryJson = null;
 let isChatSending = false;
 let lastSentChatQuery = '';
 let currentPendingUserMsgId = null;
@@ -1044,6 +1045,12 @@ function prepareVideoDisplayWithCachedItem(item) {
   if (elOut && lastSummaryText) {
     elOut.innerHTML = formatResponseHTML(lastSummaryText);
   }
+  const elRawCached = el('gvc-raw');
+  if (elRawCached && (lastSummaryJson || lastSummaryText)) {
+    elRawCached.textContent = JSON.stringify(lastSummaryJson || {
+      candidates: [{ content: { parts: [{ text: lastSummaryText }] } }]
+    }, null, 2);
+  }
 }
 
 async function loadStorageItem(item) {
@@ -1816,6 +1823,7 @@ function handlePortMessage(msg) {
         if (cand.finishReason && cand.finishReason !== 'STOP')
           txt += `\n\n[finishReason: ${cand.finishReason}]`;
         rawTextResult = txt;
+        lastSummaryJson = j;
         if (elOut) {
           elOut.innerHTML = formatResponseHTML(txt) || '(empty response)';
           elOut.style.display = 'block';
@@ -3346,10 +3354,34 @@ if (box) {
     if (id === 'gvc-toggle-raw') {
       const raw = el('gvc-raw');
       const out = el('gvc-out');
+      if (!raw || !out) return;
       const isRaw = raw.style.display !== 'none';
-      raw.style.display = isRaw ? 'none' : 'block';
-      out.style.display = isRaw ? 'block' : 'none';
-      target.innerText  = isRaw ? 'JSON' : 'Markdown';
+      if (!isRaw) {
+        // Switching to JSON view: ensure raw has content
+        if (!raw.textContent || !raw.textContent.trim()) {
+          if (lastSummaryJson) {
+            raw.textContent = JSON.stringify(lastSummaryJson, null, 2);
+          } else if (lastSummaryText) {
+            raw.textContent = JSON.stringify({
+              candidates: [{
+                content: {
+                  parts: [{ text: lastSummaryText }]
+                }
+              }]
+            }, null, 2);
+          } else {
+            raw.textContent = JSON.stringify({ status: "No response data available" }, null, 2);
+          }
+        }
+        raw.style.display = 'block';
+        out.style.display = 'none';
+        target.innerText  = 'Markdown';
+      } else {
+        // Switching back to Markdown view
+        raw.style.display = 'none';
+        out.style.display = 'block';
+        target.innerText  = 'JSON';
+      }
       return;
     }
 
@@ -5567,6 +5599,7 @@ async function saveCurrentChatLog() {
       fileResourceName: (currentGoogleFileUri && (currentGoogleFileUri.match(/files\/[a-zA-Z0-9_-]+/) || [])[0]) || null,
       summaryText: lastSummaryText || '',
       summaryPayload: lastSummaryPayload || null,
+      summaryJson: lastSummaryJson || null,
       chatHistory: chatHistory || [],
       apiKeyLast4: itemKeyLast4,
       apiKeyMasked: itemKeyLast4 ? ('••••' + itemKeyLast4) : '',
@@ -5688,7 +5721,21 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         const resArea = el('gvc-result-area');
         if (resArea) resArea.style.display = 'block';
         const rawArea = el('gvc-raw');
-        if (rawArea) rawArea.style.display = 'none';
+        if (rawArea) {
+          rawArea.style.display = 'none';
+          if (saved.summaryJson) {
+            lastSummaryJson = saved.summaryJson;
+            rawArea.textContent = JSON.stringify(saved.summaryJson, null, 2);
+          } else if (saved.summaryText) {
+            rawArea.textContent = JSON.stringify({
+              candidates: [{
+                content: {
+                  parts: [{ text: saved.summaryText }]
+                }
+              }]
+            }, null, 2);
+          }
+        }
       }
 
       const btnCont = el('gvc-btn-continue');
@@ -7632,6 +7679,7 @@ async function openAndExtract(vEl) {
   hasAnalyzedCurrentVideo = false;
   lastAnalyzedMode = null;
   lastSummaryText = '';
+  lastSummaryJson = null;
   updateActionButtonState();
   if (elCncl) elCncl.style.display = 'none';
   if (elRes)  elRes.style.display = 'none';
@@ -8062,6 +8110,7 @@ function checkSpaUrlNavigation() {
     lastAnalyzedMode = null;
     lastSummaryText = '';
     lastSummaryPayload = null;
+    lastSummaryJson = null;
     currentGoogleFileUri = null;
     sessionId = null;
     currentYouTubeData = null;

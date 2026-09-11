@@ -474,6 +474,7 @@
   font-size: 11.5px;
   color: #e7e9ea;
   line-height: 1.45;
+  min-height: 120px;
   max-height: 480px;
   overflow-y: auto;
   white-space: pre-wrap;
