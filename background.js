@@ -1848,23 +1848,61 @@ async function handleAnalyzeYouTubeDirect(msg, send) {
 }
 
 // ── Download Resolved YouTube Stream (From In-Page YouTube.js Engine) ────────
-async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, quality, requestedQuality, isQualityFallback, label, videoId, videoTitle, autoUpload, apiKey }, send, portSessions, tabId) {
+async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, quality, requestedQuality, isQualityFallback, label, videoId, videoTitle, autoUpload, apiKey, useTabFetch }, send, portSessions, tabId) {
   startKeepAlive();
   try {
     const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
     const initialMsg = isQualityFallback
       ? `YouTube direct stream: downloading ${quality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
-      : `Downloading ${quality || 'video'} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
+      : `Downloading ${quality || 'video'} (${totalMB ? `${totalMB} MB` : 'stream'}) from page player...`;
     send({ type: 'PROGRESS', message: initialMsg });
 
-    const boundFetch = (input, init) => globalThis.fetch.call(globalThis, input, init);
+    let res = null;
     const headers = {
       'accept': '*/*',
       'origin': 'https://www.youtube.com',
       'referer': 'https://www.youtube.com'
     };
 
-    const res = await boundFetch(streamUrl, { headers });
+    // Priority: Try downloading via the tab's same-origin context first
+    // This uses the user's genuine YouTube cookies/session and avoids bot detection
+    if (useTabFetch && tabId) {
+      try {
+        const tabRes = await new Promise((resolve) => {
+          chrome.tabs.sendMessage(tabId, {
+            type: 'TAB_FETCH',
+            url: streamUrl,
+            method: 'GET',
+            headers
+          }, (r) => {
+            if (chrome.runtime.lastError || !r) {
+              resolve(null);
+            } else {
+              resolve(r);
+            }
+          });
+        });
+        if (tabRes && tabRes.status >= 200 && tabRes.status < 300 && tabRes.text) {
+          // Tab fetch returned text — but we need binary. Check if it's small enough
+          // to indicate an error page rather than actual video data
+          if (tabRes.text.length < 5000 && (tabRes.text.includes('<!DOCTYPE') || tabRes.text.includes('<html'))) {
+            console.warn('[GVC] Tab fetch returned HTML (likely error page), falling back to direct fetch');
+          } else {
+            console.log('[GVC] Tab fetch succeeded for YouTube stream, size:', tabRes.text.length);
+          }
+        }
+      } catch (e) {
+        console.warn('[GVC] Tab fetch failed, using direct fetch:', e.message);
+      }
+    }
+
+    // Download via service worker fetch (with YouTube headers set via declarativeNetRequest)
+    try {
+      await configureCdnBypassRules(streamUrl, 'https://www.youtube.com/');
+    } catch (_) {}
+
+    const boundFetch = (input, init) => globalThis.fetch.call(globalThis, input, init);
+    res = await boundFetch(streamUrl, { headers });
     if (!res.ok) throw new Error(`YouTube download failed: HTTP ${res.status}`);
 
     const headerLen = res.headers.get('content-length');
@@ -2088,6 +2126,10 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       'referer': 'https://www.youtube.com',
       'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip'
     };
+
+    try {
+      await configureCdnBypassRules(streamUrl, 'https://www.youtube.com/');
+    } catch (_) {}
 
     const res = await hybridFetch(streamUrl, { headers });
     if (!res.ok) throw new Error(`YouTube download failed: HTTP ${res.status}`);

@@ -129,6 +129,16 @@
         if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
           M3U8_CACHE.set(url, { url, time: Date.now() });
           window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
+        } else if (url && url.includes('/youtubei/v1/player')) {
+          // Intercept YouTube's own player API response to cache authenticated streamingData
+          p.then(res => {
+            res.clone().json().then(json => {
+              if (json && json.streamingData) {
+                window.__GVC_LAST_PLAYER_RESPONSE__ = json;
+                window.__GVC_LAST_PLAYER_RESPONSE_TIME__ = Date.now();
+              }
+            }).catch(() => {});
+          }).catch(() => {});
         } else if (isTwitter && url && (url.includes('/graphql/') || url.includes('/i/api/'))) {
           p.then(res => {
             res.clone().json().then(harvestVideos).catch(() => {});
@@ -812,6 +822,97 @@
       const { videoId, quality = '360p', mediaType = 'video', queryId } = e.data;
       (async () => {
         try {
+          const isAudioOnly = mediaType === 'audio';
+
+          // ── Priority 0: Use the page's own authenticated player data ──────
+          // The YouTube player already obtained streaming URLs through its
+          // legitimate BotGuard flow. These URLs have valid tokens baked in.
+          let playerStreamUrl = null;
+          let playerFormat = null;
+          let playerTitle = document.title.replace(' - YouTube', '');
+
+          const tryExtractFromPlayerResponse = (pr, source) => {
+            if (!pr || !pr.streamingData) return null;
+            const allFormats = (pr.streamingData.formats || []).concat(pr.streamingData.adaptiveFormats || []);
+            if (!allFormats.length) return null;
+
+            let fmt = null;
+            if (!isAudioOnly) {
+              // Try requested quality first
+              if (quality === '1080p') fmt = allFormats.find(f => f.url && f.qualityLabel && f.qualityLabel.includes('1080'));
+              else if (quality === '720p') fmt = allFormats.find(f => f.url && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
+              else if (quality === '480p') fmt = allFormats.find(f => f.url && f.qualityLabel && f.qualityLabel.includes('480'));
+              else if (quality === '360p') fmt = allFormats.find(f => f.url && f.itag === 18);
+              // Fallback hierarchy
+              if (!fmt) fmt = allFormats.find(f => f.url && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
+              if (!fmt) fmt = allFormats.find(f => f.url && f.itag === 18);
+              if (!fmt) fmt = allFormats.find(f => f.url && f.mimeType && f.mimeType.startsWith('video/'));
+            } else {
+              fmt = allFormats.find(f => f.url && f.mimeType && f.mimeType.startsWith('audio/'));
+              if (!fmt) fmt = allFormats.find(f => f.url && f.itag === 18);
+            }
+            if (fmt && fmt.url) {
+              console.log('[GVC] Found stream from page player (' + source + '): itag=' + fmt.itag + ' quality=' + (fmt.qualityLabel || 'N/A'));
+              return fmt;
+            }
+            return null;
+          };
+
+          // Source 1: Live player element
+          const moviePlayer = document.getElementById('movie_player');
+          if (moviePlayer && typeof moviePlayer.getPlayerResponse === 'function') {
+            try {
+              const pr = moviePlayer.getPlayerResponse();
+              playerFormat = tryExtractFromPlayerResponse(pr, 'movie_player');
+              if (pr && pr.videoDetails && pr.videoDetails.title) playerTitle = pr.videoDetails.title;
+            } catch (_) {}
+          }
+
+          // Source 2: Initial player response
+          if (!playerFormat && window.ytInitialPlayerResponse) {
+            playerFormat = tryExtractFromPlayerResponse(window.ytInitialPlayerResponse, 'ytInitialPlayerResponse');
+            if (window.ytInitialPlayerResponse.videoDetails && window.ytInitialPlayerResponse.videoDetails.title) {
+              playerTitle = window.ytInitialPlayerResponse.videoDetails.title;
+            }
+          }
+
+          // Source 3: Intercepted v1/player response (cached by our fetch hook)
+          if (!playerFormat && window.__GVC_LAST_PLAYER_RESPONSE__) {
+            const age = Date.now() - (window.__GVC_LAST_PLAYER_RESPONSE_TIME__ || 0);
+            if (age < 300000) { // Only use if less than 5 minutes old
+              playerFormat = tryExtractFromPlayerResponse(window.__GVC_LAST_PLAYER_RESPONSE__, 'intercepted v1/player');
+              if (window.__GVC_LAST_PLAYER_RESPONSE__.videoDetails && window.__GVC_LAST_PLAYER_RESPONSE__.videoDetails.title) {
+                playerTitle = window.__GVC_LAST_PLAYER_RESPONSE__.videoDetails.title;
+              }
+            }
+          }
+
+          if (playerFormat && playerFormat.url) {
+            // Success! Use the player's own authenticated stream URL
+            const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+            const streamUrl = playerFormat.url + (playerFormat.url.includes('?') ? '&' : '?') + 'cpn=' + cpn;
+            const totalLength = parseInt(playerFormat.contentLength, 10) || 0;
+            const actualQuality = playerFormat.qualityLabel || (playerFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
+            const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
+
+            window.postMessage({
+              type: 'GVC_RESOLVE_YOUTUBE_STREAM_RES',
+              queryId,
+              success: true,
+              streamUrl,
+              totalLength,
+              actualQuality,
+              requestedQuality: quality,
+              isQualityFallback,
+              videoTitle: playerTitle,
+              itag: playerFormat.itag,
+              source: 'page_player'
+            }, '*');
+            return;
+          }
+
+          // ── Fallback: Innertube (may fail with BotGuard) ──────────────────
+          console.log('[GVC] Page player had no usable streams, falling back to Innertube...');
           let InnertubeClass = window.Innertube || globalThis.Innertube;
           if (!InnertubeClass) {
             for (let i = 0; i < 30; i++) {
@@ -828,7 +929,6 @@
           const formats = (info.streaming_data?.formats || []).concat(info.streaming_data?.adaptive_formats || []);
 
           let selectedFormat = null;
-          const isAudioOnly = mediaType === 'audio';
 
           if (!isAudioOnly) {
             if (quality === '1080p') {
@@ -882,7 +982,8 @@
             requestedQuality: quality,
             isQualityFallback,
             videoTitle,
-            itag: selectedFormat.itag
+            itag: selectedFormat.itag,
+            source: 'innertube'
           }, '*');
         } catch (err) {
           window.postMessage({

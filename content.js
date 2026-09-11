@@ -6553,7 +6553,34 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
   // Case B: If on YouTube, resolve stream and auto-upload
   if (currentYouTubeData && currentYouTubeData.videoId) {
     if (forChat) {
-      updateChatTypingStatus('Fetching video stream for active API key...\nResolving 360p stream via YouTube.js...');
+      updateChatTypingStatus('Fetching video stream for active API key...\nResolving stream from YouTube page player...');
+    }
+
+    // Priority 0: If we already have stream URLs from the page player, use them directly
+    // These URLs were obtained through YouTube's legitimate BotGuard flow and are authenticated
+    if (currentYouTubeData.videoStreams && currentYouTubeData.videoStreams.length > 0) {
+      const directStream = currentYouTubeData.videoStreams.find(s => s.url && s.mimeType && s.mimeType.includes('video/')) || currentYouTubeData.videoStreams[0];
+      if (directStream && directStream.url) {
+        console.log('[GVC] Using page player stream URL directly (bypassing Innertube):', directStream.qualityLabel || directStream.label);
+        const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+        const streamUrl = directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + cpn;
+        connectPort();
+        port.postMessage({
+          type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
+          streamUrl: streamUrl,
+          totalLength: parseInt(directStream.contentLength, 10) || 0,
+          quality: directStream.qualityLabel || '360p',
+          requestedQuality: '360p',
+          isQualityFallback: false,
+          label: 'YouTube Video',
+          videoId: currentYouTubeData.videoId,
+          videoTitle: currentYouTubeData.title,
+          autoUpload: true,
+          apiKey: apiKey,
+          useTabFetch: true // Signal to download via tab's same-origin context
+        });
+        return;
+      }
     }
     const qId = 'yt_stream_' + Date.now();
     let handled = false;
@@ -7143,7 +7170,7 @@ async function handleMainActionClick() {
           if (rawArea2) rawArea2.style.display = 'none';
           if (elOut) {
             elOut.style.display = 'block';
-            elOut.innerText = 'Connecting to YouTube.js engine...';
+            elOut.innerText = 'Resolving stream from YouTube page player...';
           }
           const elUsage2 = el('gvc-token-usage');
           if (elUsage2) elUsage2.style.display = 'none';
@@ -7151,6 +7178,32 @@ async function handleMainActionClick() {
           if (btnCont2) btnCont2.style.display = 'none';
           const btnNew2 = el('gvc-btn-new-chat');
           if (btnNew2) btnNew2.style.display = 'none';
+
+          // Priority 0: If we already have stream URLs from the page player, use them directly
+          if (currentYouTubeData.videoStreams && currentYouTubeData.videoStreams.length > 0) {
+            const directStream = currentYouTubeData.videoStreams.find(s => s.url && s.mimeType && s.mimeType.includes('video/')) || currentYouTubeData.videoStreams[0];
+            if (directStream && directStream.url) {
+              console.log('[GVC] Manual download: Using page player stream URL directly:', directStream.qualityLabel || directStream.label);
+              const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+              const streamUrl = directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + cpn;
+              const totalMB = directStream.contentLength ? (parseInt(directStream.contentLength, 10) / 1024 / 1024).toFixed(1) : null;
+              if (elOut) elOut.innerText = `Downloading video stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`;
+              connectPort();
+              port.postMessage({
+                type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
+                streamUrl: streamUrl,
+                totalLength: parseInt(directStream.contentLength, 10) || 0,
+                quality: directStream.qualityLabel || '360p',
+                requestedQuality: '360p',
+                isQualityFallback: false,
+                label: 'YouTube Video',
+                videoId: currentYouTubeData.videoId,
+                videoTitle: currentYouTubeData.title,
+                useTabFetch: true
+              });
+              return;
+            }
+          }
 
           const qId = 'yt_stream_' + Date.now();
           let handled = false;
