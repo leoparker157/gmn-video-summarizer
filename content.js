@@ -2514,10 +2514,6 @@ if (box) {
       </div>
       <div style="font-size:11px;color:#71767b;margin-top:3px;margin-bottom:8px;">When disabled, buttons on video players are hidden. You can still summarize by right-clicking any video.</div>
 
-      <div class="gvc-divider"></div>
-      <div class="gvc-section-title">🛠️ Stream Diagnostics Recorder</div>
-      <div style="font-size:11px;color:#71767b;margin-bottom:8px;">Export active video player parameters, stream URLs, and network requests to JSON.</div>
-      <button class="gvc-btn-sub" id="gvc-export-diagnostics" style="width:100%;padding:7px;">📋 Export Stream Diagnostics JSON</button>
     </div>
 
     <div id="gvc-body">
@@ -3690,72 +3686,6 @@ function probeRemoteStreamMetadata(url) {
   });
 }
 
-// ── Stream Diagnostics & Environment Inspector ───────────────────────────────
-async function exportStreamDiagnostics() {
-  const diag = {
-    timestamp: new Date().toISOString(),
-    pageUrl: window.location.href,
-    pageTitle: document.title,
-    topFrame: isTopFrame,
-    availableVariants: availableVariants,
-    selectedVariant: selectedVariant,
-    userSettings: {
-      preferredQuality: S.gic_v_preferred_quality || 'auto',
-      model: S.gic_v_model,
-      retryCount: S.gic_v_retry_count
-    },
-    activeVideoElement: lastTargetVideoEl ? {
-      src: lastTargetVideoEl.src,
-      currentSrc: lastTargetVideoEl.currentSrc,
-      videoWidth: lastTargetVideoEl.videoWidth,
-      videoHeight: lastTargetVideoEl.videoHeight,
-      duration: lastTargetVideoEl.duration,
-      paused: lastTargetVideoEl.paused,
-      readyState: lastTargetVideoEl.readyState
-    } : null,
-    allVideosOnPage: Array.from(document.querySelectorAll('video')).map((v, i) => ({
-      index: i,
-      src: v.src,
-      currentSrc: v.currentSrc,
-      videoWidth: v.videoWidth,
-      videoHeight: v.videoHeight,
-      duration: v.duration,
-      paused: v.paused
-    })),
-    iframesOnPage: Array.from(document.querySelectorAll('iframe')).map((f, i) => ({
-      index: i,
-      id: f.id,
-      src: f.src,
-      name: f.name
-    })),
-    recentMediaRequests: performance.getEntriesByType('resource')
-      .filter(r => r.name.includes('.m3u8') || r.name.includes('.ts') || r.name.includes('.mp4') || r.name.match(/_[0-9]+\.js/i))
-      .slice(-30)
-      .map(r => ({ url: r.name, durationMs: Math.round(r.duration), transferSize: r.transferSize }))
-  };
-
-  const jsonStr = JSON.stringify(diag, null, 2);
-  try {
-    await navigator.clipboard.writeText(jsonStr);
-  } catch (_) {}
-
-  const blob = new Blob([jsonStr], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `stream_diagnostics_${Date.now()}.json`;
-  a.click();
-
-  const exportBtn = el('gvc-export-diagnostics');
-  if (exportBtn) {
-    const orig = exportBtn.innerText;
-    exportBtn.innerText = '✓ Diagnostics Copied & Saved!';
-    exportBtn.style.color = '#00ba7c';
-    setTimeout(() => {
-      exportBtn.innerText = orig;
-      exportBtn.style.color = '';
-    }, 2500);
-  }
-}
 
 // ── Resolution Parsing & Selection ───────────────────────────────────────────
 function parseVariant(variant, index, total) {
