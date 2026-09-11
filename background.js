@@ -24,6 +24,7 @@ const TAB_MEDIA_STREAMS = new Map(); // tabId -> Map of stream objects
 const TAB_TS_CLUSTERS = new Map();   // tabId -> Map of baseKey -> cluster
 const HLS_KEY_CACHE = new Map();     // keyUri -> CryptoKey
 const ACTIVE_DOWNLOADS = new Map();  // cleanUrl -> download session (for chunk-level resumption)
+const ACTIVE_STREAM_TRANSFERS = new Map(); // transferId -> in-flight tab streaming download
 const ACTIVE_ABORTS = new Map();     // sessionId -> abortState
 const ACTIVE_CHAT_ABORTS = ACTIVE_ABORTS; // backwards-compatible alias
 
@@ -601,6 +602,84 @@ chrome.runtime.onConnect.addListener((port) => {
         await handleUploadSession(msg, send);
       } else if (msg.type === 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM') {
         await handleDownloadResolvedYouTubeStream(msg, send, portSessions, tabId);
+      } else if (msg.type === 'STREAM_TRANSFER_START') {
+        startKeepAlive();
+        ACTIVE_STREAM_TRANSFERS.set(msg.transferId, {
+          chunks: [],
+          receivedBytes: 0,
+          videoId: msg.videoId,
+          videoTitle: msg.videoTitle,
+          quality: msg.quality || '360p',
+          isQualityFallback: Boolean(msg.isQualityFallback),
+          totalLength: msg.totalLength || 0,
+          autoUpload: Boolean(msg.autoUpload),
+          apiKey: msg.apiKey,
+          tabId: tabId
+        });
+        send({
+          type: 'PROGRESS',
+          message: `Downloading ${msg.quality || '360p'} stream directly from YouTube page...`
+        });
+      } else if (msg.type === 'STREAM_TRANSFER_CHUNK') {
+        const transfer = ACTIVE_STREAM_TRANSFERS.get(msg.transferId);
+        if (transfer && msg.chunk) {
+          transfer.chunks.push(new Uint8Array(msg.chunk));
+          transfer.receivedBytes += msg.chunk.byteLength;
+        }
+      } else if (msg.type === 'STREAM_TRANSFER_END') {
+        const transfer = ACTIVE_STREAM_TRANSFERS.get(msg.transferId);
+        if (transfer) {
+          ACTIVE_STREAM_TRANSFERS.delete(msg.transferId);
+          try {
+            const firstChunk = transfer.chunks.length > 0 ? transfer.chunks[0] : null;
+            const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : 'video/mp4';
+            const blob = new Blob(transfer.chunks, { type: detectedMime });
+
+            if (blob.size < 150 * 1024) {
+              throw new Error(`Downloaded media stream was truncated (${(blob.size / 1024).toFixed(1)} KB).`);
+            }
+
+            const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
+            const sessionId = crypto.randomUUID();
+            const downloadLabel = transfer.isQualityFallback
+              ? `YouTube (${transfer.quality || '360p'} • Best Available)`
+              : (transfer.videoTitle ? `${transfer.videoTitle} (${transfer.quality || '360p'})` : `YouTube (${transfer.quality || '360p'})`);
+
+            SESSIONS[sessionId] = {
+              blob,
+              sizeMB,
+              fileUri: null,
+              videoUrl: `https://www.youtube.com/watch?v=${transfer.videoId}`,
+              label: downloadLabel,
+              createdAt: Date.now()
+            };
+
+            if (portSessions) portSessions.add(sessionId);
+
+            send({
+              type: 'DOWNLOAD_DONE',
+              sessionId,
+              sizeMB,
+              url: `https://www.youtube.com/watch?v=${transfer.videoId}`,
+              label: downloadLabel,
+              actualQuality: transfer.quality || '360p',
+              requestedQuality: transfer.quality || '360p',
+              isQualityFallback: transfer.isQualityFallback
+            });
+
+            if (transfer.autoUpload && transfer.apiKey) {
+              await uploadSessionBlobToGoogleFiles(sessionId, transfer.apiKey, send);
+            }
+          } catch (finishErr) {
+            send({ type: 'ERROR', message: `Video stream processing failed: ${finishErr.message}` });
+          } finally {
+            stopKeepAlive();
+          }
+        }
+      } else if (msg.type === 'STREAM_TRANSFER_ERROR') {
+        ACTIVE_STREAM_TRANSFERS.delete(msg.transferId);
+        stopKeepAlive();
+        send({ type: 'ERROR', message: `YouTube stream download failed: ${msg.error}` });
       } else if (msg.type === 'YOUTUBE_JS_DOWNLOAD') {
         await handleYouTubeDownloadWithYouTubeJS(msg, send, portSessions, tabId);
       } else if (msg.type === 'CHAT_QUERY') {
@@ -647,6 +726,8 @@ async function configureCdnBypassRules(targetUrl, refererUrl) {
   if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
   try {
     const targetHost = (new URL(targetUrl)).hostname;
+    const isGoogleVideo = targetHost.includes('googlevideo.com');
+    const filter = isGoogleVideo ? '*://*.googlevideo.com/*' : `||${targetHost}/`;
     const requestHeaders = [];
     if (refererUrl) {
       requestHeaders.push({ header: 'Referer', operation: 'set', value: refererUrl });
@@ -666,7 +747,7 @@ async function configureCdnBypassRules(targetUrl, refererUrl) {
           requestHeaders: requestHeaders
         },
         condition: {
-          urlFilter: `||${targetHost}/`,
+          urlFilter: filter,
           resourceTypes: ['xmlhttprequest', 'media', 'other']
         }
       }]
@@ -1970,19 +2051,8 @@ async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, qua
       await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send);
     }
   } catch (err) {
-    if (videoId) {
-      console.warn(`[GVC Background] Stream URL direct fetch failed (${err.message}), falling back to YouTube.js engine...`);
-      send({ type: 'PROGRESS', message: 'Direct stream fetch blocked. Resolving via YouTube.js engine...' });
-      return await handleYouTubeDownloadWithYouTubeJS({
-        videoId,
-        quality: requestedQuality || quality || '360p',
-        mediaType: 'video',
-        label,
-        autoUpload,
-        apiKey
-      }, send, portSessions, tabId);
-    }
-    throw err;
+    console.error(`[GVC Background] Stream URL direct fetch failed: ${err.message}`);
+    throw new Error(`YouTube stream download failed (${err.message}). Please retry or switch to Mode 1 (Cloud Direct).`);
   } finally {
     stopKeepAlive();
   }

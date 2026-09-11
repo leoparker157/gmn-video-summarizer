@@ -6,6 +6,8 @@
 (async () => {
 'use strict';
 
+if (window.location.hostname === 'accounts.youtube.com') return;
+
 // ── Extension Context Invalidation Guard ──────────────────────────────────────
 function isExtensionValid() {
   try {
@@ -53,6 +55,7 @@ let currentSelectedYouTubeAudioQuality = 'best';
 let isSilentUploading = false;
 let lastSilentUploadTimestamp = 0;
 let pendingChatQueryAfterUpload = null;
+let activeTabStreamAbortController = null;
 
 let chatHistory = [];
 let chatPagination = {};
@@ -3361,6 +3364,10 @@ if (box) {
       isProcessing = false;
       isDownloading = false;
       autoAnalyzeOnDownload = false;
+      if (activeTabStreamAbortController) {
+        try { activeTabStreamAbortController.abort(); } catch (_) {}
+        activeTabStreamAbortController = null;
+      }
       if (port) {
         if (sessionId) port.postMessage({ type: 'CANCEL_SESSION', sessionId });
       }
@@ -6492,6 +6499,123 @@ function buildChatPayload(userQuestion) {
   return payload;
 }
 
+// ── In-Tab Streaming Downloader (Native Structured Clone Chunks via Port) ─────
+async function startTabStreamingDownload({
+  streamUrl,
+  totalLength = 0,
+  quality = '360p',
+  isQualityFallback = false,
+  videoId,
+  videoTitle,
+  autoUpload = false,
+  apiKey = null,
+  forChat = false
+}) {
+  connectPort();
+  const transferId = 'yt_stream_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  const totalMB = totalLength > 0 ? (totalLength / 1024 / 1024).toFixed(1) : null;
+
+  const elOut = el('gvc-out');
+  const initialMsg = `Downloading video stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`;
+  if (elOut) {
+    elOut.style.display = 'block';
+    elOut.innerText = initialMsg;
+  }
+  if (forChat) {
+    updateChatTypingStatus(initialMsg);
+  }
+
+  if (activeTabStreamAbortController) {
+    try { activeTabStreamAbortController.abort(); } catch (_) {}
+  }
+  activeTabStreamAbortController = new AbortController();
+
+  port.postMessage({
+    type: 'STREAM_TRANSFER_START',
+    transferId,
+    videoId: videoId || currentYouTubeData?.videoId,
+    videoTitle: videoTitle || currentYouTubeData?.title || 'YouTube Video',
+    quality: quality || '360p',
+    isQualityFallback: Boolean(isQualityFallback),
+    totalLength: totalLength || 0,
+    autoUpload: Boolean(autoUpload),
+    apiKey: apiKey || S.apiKey || null
+  });
+
+  try {
+    const res = await fetch(streamUrl, {
+      signal: activeTabStreamAbortController.signal
+    });
+    if (!res.ok) {
+      throw new Error(`Stream download failed: HTTP ${res.status}`);
+    }
+
+    const headerLen = res.headers.get('content-length');
+    const actualTotal = totalLength || (headerLen ? parseInt(headerLen, 10) : 0);
+    const actualTotalMB = actualTotal > 0 ? (actualTotal / (1024 * 1024)).toFixed(1) : totalMB;
+
+    const reader = res.body.getReader();
+    let received = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+
+      const chunkBuffer = (value.byteOffset === 0 && value.byteLength === value.buffer.byteLength)
+        ? value.buffer
+        : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+
+      port.postMessage({
+        type: 'STREAM_TRANSFER_CHUNK',
+        transferId,
+        chunk: chunkBuffer
+      });
+
+      if (actualTotal > 0) {
+        const pct = Math.round((received / actualTotal) * 100);
+        const mb = (received / 1024 / 1024).toFixed(1);
+        const progressMsg = `Downloading video stream: ${pct}% (${mb} / ${actualTotalMB} MB)...`;
+        if (elOut) elOut.innerText = progressMsg;
+        if (forChat) updateChatTypingStatus(progressMsg);
+        port.postMessage({
+          type: 'DL_PROGRESS',
+          pct,
+          mb,
+          totalMB: actualTotalMB
+        });
+      }
+    }
+
+    port.postMessage({
+      type: 'STREAM_TRANSFER_END',
+      transferId,
+      totalBytes: received
+    });
+    return true;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log('[GVC] Tab stream download cancelled by user.');
+      port.postMessage({
+        type: 'STREAM_TRANSFER_ERROR',
+        transferId,
+        error: 'Cancelled by user'
+      });
+      return false;
+    }
+    console.error('[GVC] Tab stream download error:', err);
+    if (elOut) {
+      elOut.innerText = `Stream download error: ${err.message}`;
+    }
+    port.postMessage({
+      type: 'STREAM_TRANSFER_ERROR',
+      transferId,
+      error: err.message
+    });
+    throw err;
+  }
+}
+
 // ── Silent Video Upload Controller for Mode 2 ──────────────────────────────
 // State initialized at module top (pendingChatQueryAfterUpload, isSilentUploading, lastSilentUploadTimestamp)
 
@@ -6561,23 +6685,20 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
     if (currentYouTubeData.videoStreams && currentYouTubeData.videoStreams.length > 0) {
       const directStream = currentYouTubeData.videoStreams.find(s => s.url && s.mimeType && s.mimeType.includes('video/')) || currentYouTubeData.videoStreams[0];
       if (directStream && directStream.url) {
-        console.log('[GVC] Using page player stream URL directly (bypassing Innertube):', directStream.qualityLabel || directStream.label);
-        const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-        const streamUrl = directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + cpn;
-        connectPort();
-        port.postMessage({
-          type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
-          streamUrl: streamUrl,
+        console.log('[GVC] Using page player stream URL directly for tab streaming:', directStream.qualityLabel || directStream.label);
+        const streamUrl = directStream.url.includes('cpn=')
+          ? directStream.url
+          : directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+        startTabStreamingDownload({
+          streamUrl,
           totalLength: parseInt(directStream.contentLength, 10) || 0,
           quality: directStream.qualityLabel || '360p',
-          requestedQuality: '360p',
           isQualityFallback: false,
-          label: 'YouTube Video',
           videoId: currentYouTubeData.videoId,
           videoTitle: currentYouTubeData.title,
           autoUpload: true,
           apiKey: apiKey,
-          useTabFetch: true // Signal to download via tab's same-origin context
+          forChat: Boolean(forChat)
         });
         return;
       }
@@ -6611,19 +6732,16 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
           return;
         }
 
-        connectPort();
-        port.postMessage({
-          type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
+        startTabStreamingDownload({
           streamUrl: event.data.streamUrl,
           totalLength: event.data.totalLength,
           quality: '360p',
-          requestedQuality: '360p',
           isQualityFallback: false,
-          label: 'YouTube Video',
           videoId: currentYouTubeData.videoId,
           videoTitle: event.data.videoTitle,
           autoUpload: true,
-          apiKey: apiKey
+          apiKey: apiKey,
+          forChat: Boolean(forChat)
         });
       }
     };
@@ -7183,23 +7301,20 @@ async function handleMainActionClick() {
           if (currentYouTubeData.videoStreams && currentYouTubeData.videoStreams.length > 0) {
             const directStream = currentYouTubeData.videoStreams.find(s => s.url && s.mimeType && s.mimeType.includes('video/')) || currentYouTubeData.videoStreams[0];
             if (directStream && directStream.url) {
-              console.log('[GVC] Manual download: Using page player stream URL directly:', directStream.qualityLabel || directStream.label);
-              const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-              const streamUrl = directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + cpn;
-              const totalMB = directStream.contentLength ? (parseInt(directStream.contentLength, 10) / 1024 / 1024).toFixed(1) : null;
-              if (elOut) elOut.innerText = `Downloading video stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`;
-              connectPort();
-              port.postMessage({
-                type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
-                streamUrl: streamUrl,
+              console.log('[GVC] Manual download: Using page player stream URL for tab streaming:', directStream.qualityLabel || directStream.label);
+              const streamUrl = directStream.url.includes('cpn=')
+                ? directStream.url
+                : directStream.url + (directStream.url.includes('?') ? '&' : '?') + 'cpn=' + Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+              startTabStreamingDownload({
+                streamUrl,
                 totalLength: parseInt(directStream.contentLength, 10) || 0,
                 quality: directStream.qualityLabel || '360p',
-                requestedQuality: '360p',
                 isQualityFallback: false,
-                label: 'YouTube Video',
                 videoId: currentYouTubeData.videoId,
                 videoTitle: currentYouTubeData.title,
-                useTabFetch: true
+                autoUpload: true,
+                apiKey: apiKey,
+                forChat: false
               });
               return;
             }
@@ -7228,21 +7343,16 @@ async function handleMainActionClick() {
               }
 
               // Resolved directly from YouTube page with genuine same-origin!
-              const totalMB = event.data.totalLength > 0 ? (event.data.totalLength / 1024 / 1024).toFixed(1) : null;
-              const statusMsg = `Downloading video stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`;
-              if (elOut) elOut.innerText = statusMsg;
-
-              connectPort();
-              port.postMessage({
-                type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
+              startTabStreamingDownload({
                 streamUrl: event.data.streamUrl,
                 totalLength: event.data.totalLength,
                 quality: '360p',
-                requestedQuality: '360p',
                 isQualityFallback: false,
-                label: 'YouTube Video',
                 videoId: currentYouTubeData.videoId,
-                videoTitle: event.data.videoTitle
+                videoTitle: event.data.videoTitle,
+                autoUpload: true,
+                apiKey: apiKey,
+                forChat: false
               });
             }
           };

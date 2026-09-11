@@ -5,6 +5,7 @@
 (function() {
   'use strict';
 
+  if (window.location.hostname === 'accounts.youtube.com') return;
   if (window.__GVC_MAIN_WORLD_INJECTED__) return;
   window.__GVC_MAIN_WORLD_INJECTED__ = true;
 
@@ -823,6 +824,7 @@
         }
       }
     } else if (e.data.type === 'GVC_RESOLVE_YOUTUBE_STREAM') {
+      if (window.self !== window.top || window.location.hostname !== 'www.youtube.com') return;
       const { videoId, quality = '360p', mediaType = 'video', queryId } = e.data;
       (async () => {
         try {
@@ -951,8 +953,9 @@
             }
 
             if (streamUrl) {
-              const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-              const fullStreamUrl = streamUrl + (streamUrl.includes('?') ? '&' : '?') + 'cpn=' + cpn;
+              const fullStreamUrl = streamUrl.includes('cpn=')
+                ? streamUrl
+                : streamUrl + (streamUrl.includes('?') ? '&' : '?') + 'cpn=' + Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
               const totalLength = parseInt(playerFormat.contentLength, 10) || 0;
               const actualQuality = playerFormat.qualityLabel || (playerFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
               const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
