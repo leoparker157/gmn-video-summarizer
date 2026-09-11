@@ -286,7 +286,8 @@ async function loadItemAndPrepare(item) {
       platform: item.platform,
       isCloudDirect: isCloud,
       apiKeyLast4: item.apiKeyLast4 || '',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      autoOpen: true
     }
   });
 

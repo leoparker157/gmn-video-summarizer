@@ -1123,7 +1123,8 @@ async function loadStorageItem(item) {
         platform: item.platform,
         isCloudDirect: item.isCloudDirect || !isGoogleFilesUri(item.fileUri) || item.sizeMB === '0',
         apiKeyLast4: itemKeyLast4,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        autoOpen: true
       }
     });
     window.location.href = item.pageUrl;
@@ -1136,6 +1137,12 @@ async function checkTargetPreparationOnNavigation() {
     const data = await store.get('gvc_prepare_target');
     const target = data && data.gvc_prepare_target;
     if (!target) return;
+
+    // Strict validation: target must have been explicitly set by user within the last 8 seconds
+    if (!target.autoOpen || !target.createdAt || (Date.now() - target.createdAt > 8000)) {
+      await store.set({ gvc_prepare_target: null });
+      return;
+    }
 
     const normTarget = normalizePageUrl(target.pageUrl);
     const normCurr = normalizePageUrl(window.location.href);
@@ -2344,6 +2351,7 @@ const chk  = (v) => v ? 'checked' : '';
 
 if (box) {
   box.id = 'gvc-box';
+  box.style.display = 'none';
   box.innerHTML = `
   <div id="gvc-header">
     <div id="gvc-title-wrap">
@@ -8144,8 +8152,8 @@ function checkSpaUrlNavigation() {
     }
     checkTargetPreparationOnNavigation().catch(() => {});
 
-    // If summarizer box is open, automatically re-extract and bind the new video context
-    if (box && box.style.display !== 'none') {
+    // If summarizer box is currently open, automatically re-extract and bind the new video context
+    if (box && box.style.display === 'flex') {
       setTimeout(() => {
         if (!teardownIfOrphaned()) {
           extractVideoInfo(null);
@@ -8401,27 +8409,12 @@ window.addEventListener('message', (e) => {
 
   if (e.data.type === 'GVC_M3U8_CAPTURED' && e.data.url) {
     const m3u8Url = cleanMediaUrl(e.data.url);
-    if (!isTopFrame) {
-      safeSendMessage({
-        type: 'FORWARD_TO_TOP_FRAME',
-        payload: {
-          type: 'OPEN_VIDEO_FROM_IFRAME',
-          variants: [{
-            url: m3u8Url,
-            content_type: 'application/x-mpegURL',
-            label: 'HLS Master Stream',
-            badge: 'HLS'
-          }]
+    if (isTopFrame && box && box.style.display === 'flex' && !sessionId) {
+      probeRemoteStreamMetadata(m3u8Url).then(meta => {
+        if (meta && meta.variants && meta.variants.length > 0) {
+          renderResolutionSelection(meta.variants);
         }
-      });
-    } else {
-      if (!sessionId) {
-        probeRemoteStreamMetadata(m3u8Url).then(meta => {
-          if (meta && meta.variants && meta.variants.length > 0) {
-            renderResolutionSelection(meta.variants);
-          }
-        }).catch(() => {});
-      }
+      }).catch(() => {});
     }
     return;
   }
@@ -8542,9 +8535,6 @@ if (isTwimg || isMediaDoc) {
     const v = document.querySelector('video');
     const vUrl = (v && (v.currentSrc || v.src)) || window.location.href;
     currentVideoUrl = vUrl;
-    if (v) {
-      extractVideoInfo(v);
-    }
   };
 
   if (document.readyState === 'loading') {
@@ -8553,11 +8543,8 @@ if (isTwimg || isMediaDoc) {
     initMediaDoc();
   }
   window.addEventListener('load', initMediaDoc);
-  setTimeout(initMediaDoc, 50);
-  setTimeout(initMediaDoc, 200);
-  setTimeout(initMediaDoc, 600);
-  setTimeout(initMediaDoc, 1500);
-  setTimeout(initMediaDoc, 3000);
+  setTimeout(initMediaDoc, 100);
+  setTimeout(initMediaDoc, 500);
 }
 
 })();
