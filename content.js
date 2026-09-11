@@ -1519,8 +1519,8 @@ function formatResponseHTML(raw) {
   formatted = formatted.replace(/\n\n+/g, '<div class="gvc-para-gap"></div>');
   formatted = formatted.replace(/\n/g, '<br>');
 
-  // Convert video timestamps to interactive seek buttons (supports MM:SS, HH:MM:SS, minutes >= 60 like 71:50, 120:25, all Unicode ranges/brackets/arrows/Asian punctuation)
-  formatted = formatted.replace(/(^|[\s\[\({\<"'\u201C\u2018\u00AB\uFF08\u3010\u300C\u300E\u300A\u3008\->~–—\u2212\u2012\u2015\uFF0D\u301C\uFF5E\u2192•·\u2023\u2043\u2219*_|/\\;>])((?:(\d{1,3}):)?(\d{1,4}):([0-5]\d))(?=$|[\s\]\)\}>"'\u201D\u2019\u00BB\uFF09\u3011\u300D\u300F\u300B\u3009\->~–—\u2212\u2012\u2015\uFF0D\u301C\uFF5E\u2192.,;!?<|/*_\\\u3002\uFF0C\uFF1B\uFF01\uFF1F]|[:\uFF1A](?!\d))/g, (match, prefix, timeStr) => {
+  // Convert video timestamps to interactive seek buttons (supports MM:SS, HH:MM:SS, minutes >= 60 like 71:50, 120:25, all Unicode ranges/brackets/arrows/Asian punctuation/emojis)
+  formatted = formatted.replace(/(^|[^\p{L}\p{N}])((?:(\d{1,3}):)?(\d{1,4}):([0-5]\d))(?=$|[^\p{L}\p{N}:]|[:\uFF1A](?!\d))/gu, (match, prefix, timeStr) => {
     const parts = timeStr.split(':').map(Number);
     let sec = 0;
     if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
