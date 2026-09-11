@@ -864,7 +864,8 @@
                   const cipher = f.signatureCipher || f.signature_cipher || f.cipher;
                   if (cipher && player && typeof player.decipher === 'function') {
                     try {
-                      f.url = await player.decipher(cipher);
+                      const cipherStr = typeof cipher === 'string' ? cipher : (new URLSearchParams(cipher).toString());
+                      f.url = await player.decipher(f.url, cipherStr);
                     } catch (e) {
                       console.warn('[GVC Main] Error deciphering in-page format:', e);
                     }
