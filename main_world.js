@@ -848,6 +848,69 @@
             }
           }
 
+          // 1b. If in-page formats exist from active authorized session, decipher their signatureCipher directly
+          if (formats.length > 0) {
+            let player = null;
+            if (InnertubeClass) {
+              try {
+                const ytDec = await InnertubeClass.create({ generate_session_locally: true });
+                player = ytDec.session?.player;
+              } catch (_) {}
+            }
+
+            for (const f of formats) {
+              if (!f.url) {
+                const cipher = f.signatureCipher || f.signature_cipher || f.cipher;
+                if (cipher) {
+                  try {
+                    if (player && typeof player.decipher === 'function') {
+                      f.url = await player.decipher(cipher);
+                    } else {
+                      const params = new URLSearchParams(cipher);
+                      const rawUrl = params.get('url');
+                      const s = params.get('s');
+                      const sp = params.get('sp') || 'sig';
+                      if (rawUrl) {
+                        f.url = s ? `${rawUrl}&${sp}=${encodeURIComponent(s)}` : rawUrl;
+                      }
+                    }
+                  } catch (e) {
+                    console.warn('[GVC Main] Error deciphering in-page format:', e);
+                  }
+                }
+              }
+            }
+          }
+
+          // 1c. If active tab is already playing the video, sniff the active googlevideo stream from performance entries
+          if (!formats.length || !formats.some(f => f.url)) {
+            try {
+              const resEntries = (window.performance && typeof window.performance.getEntriesByType === 'function')
+                ? window.performance.getEntriesByType('resource')
+                : [];
+              const gvEntries = (resEntries || []).filter(r => r.name && r.name.includes('googlevideo.com/videoplayback'));
+              if (gvEntries.length > 0) {
+                for (let i = gvEntries.length - 1; i >= 0; i--) {
+                  const entryUrl = gvEntries[i].name;
+                  try {
+                    const u = new URL(entryUrl);
+                    u.searchParams.delete('range');
+                    const streamUrl = u.toString();
+                    const itag = parseInt(u.searchParams.get('itag'), 10) || 18;
+                    const isAudio = itag === 140 || itag === 251 || itag === 250 || itag === 249;
+                    formats.push({
+                      itag,
+                      url: streamUrl,
+                      quality_label: itag === 18 ? '360p' : (itag === 22 ? '720p' : 'Auto'),
+                      has_video: !isAudio,
+                      has_audio: itag === 18 || itag === 22 || isAudio
+                    });
+                  } catch (_) {}
+                }
+              }
+            } catch (_) {}
+          }
+
           // 2. If in-page formats not available or lack direct urls, resolve via Innertube waterfall with cookies
           let info = null;
           let lastPlayabilityStatus = inPagePlayerResponse?.playabilityStatus || null;

@@ -684,7 +684,7 @@ async function getYouTubeAuthCookies() {
         try {
           const list = await chrome.cookies.getAll(storeId ? { url, storeId } : { url });
           for (const c of (list || [])) {
-            if (c && c.name && c.value) cookieMap.set(c.name, c.value);
+            if (c && c.name && c.value && !cookieMap.has(c.name)) cookieMap.set(c.name, c.value);
           }
         } catch (_) {}
       }
@@ -2223,7 +2223,37 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       }
     }
 
+    const tryRescueSniffedStream = async () => {
+      if (activeTabId && TAB_MEDIA_STREAMS.has(activeTabId)) {
+        const tabStreams = Array.from(TAB_MEDIA_STREAMS.get(activeTabId).values());
+        const gvStreams = tabStreams.filter(s => s && s.url && s.url.includes('googlevideo.com/videoplayback'));
+        if (gvStreams.length > 0) {
+          let bestGv = gvStreams.find(s => s.height === 360 || s.label?.includes('360')) ||
+                       gvStreams.find(s => s.height > 0 && !s.isAudio) ||
+                       gvStreams[0];
+          if (bestGv && bestGv.url) {
+            console.log('[GVC Background] Rescuing age-restricted download via tab sniffed googlevideo stream:', bestGv.url.slice(0, 80));
+            await handleDownloadResolvedYouTubeStream({
+              streamUrl: bestGv.url,
+              totalLength: bestGv.sizeBytes || 0,
+              quality: bestGv.height ? `${bestGv.height}p` : '360p',
+              requestedQuality: quality,
+              isQualityFallback: false,
+              label: label || 'YouTube Video',
+              videoId,
+              videoTitle: label || 'YouTube Video',
+              autoUpload,
+              apiKey
+            }, send, portSessions, tabId);
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
     if (!info || !info.streaming_data) {
+      if (await tryRescueSniffedStream()) return;
       if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
         const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
         throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
@@ -2268,31 +2298,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     }
 
     if (!selectedFormat || !selectedFormat.url) {
-      // Sniffed stream rescue path: check if the tab's active player has already sniffed a playing stream
-      if (activeTabId && TAB_MEDIA_STREAMS.has(activeTabId)) {
-        const tabStreams = Array.from(TAB_MEDIA_STREAMS.get(activeTabId).values());
-        const gvStreams = tabStreams.filter(s => s && s.url && s.url.includes('googlevideo.com/videoplayback'));
-        if (gvStreams.length > 0) {
-          let bestGv = gvStreams.find(s => s.height === 360 || s.label?.includes('360')) ||
-                       gvStreams.find(s => s.height > 0 && !s.isAudio) ||
-                       gvStreams[0];
-          if (bestGv && bestGv.url) {
-            console.log('[GVC Background] Rescuing age-restricted download via tab sniffed googlevideo stream:', bestGv.url.slice(0, 80));
-            return await handleDownloadResolvedYouTubeStream({
-              streamUrl: bestGv.url,
-              totalLength: bestGv.sizeBytes || 0,
-              quality: bestGv.height ? `${bestGv.height}p` : '360p',
-              requestedQuality: quality,
-              isQualityFallback: false,
-              label: label || 'YouTube Video',
-              videoId,
-              videoTitle: label || 'YouTube Video',
-              autoUpload,
-              apiKey
-            }, send, portSessions, tabId);
-          }
-        }
-      }
+      if (await tryRescueSniffedStream()) return;
 
       if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
         const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
