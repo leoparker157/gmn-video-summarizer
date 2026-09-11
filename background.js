@@ -1992,7 +1992,7 @@ async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, qua
 async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', mediaType = 'video', label, autoUpload, apiKey }, send, portSessions, tabId) {
   startKeepAlive();
   try {
-    send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine (Android Client)...' });
+    send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine (Web Client)...' });
 
     if (typeof globalThis.Innertube === 'undefined') {
       throw new Error('YouTube.js engine is not loaded in service worker.');
@@ -2064,12 +2064,11 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     };
 
     const yt = await globalThis.Innertube.create({
-      client_type: 'ANDROID',
       fetch: hybridFetch
     });
     send({ type: 'PROGRESS', message: 'Extracting direct media formats...' });
 
-    const info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
+    const info = await yt.getBasicInfo(videoId);
     const videoTitle = info.basic_info?.title || label || 'YouTube Video';
     const cpn = info.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
 
@@ -2123,8 +2122,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     const headers = {
       'accept': '*/*',
       'origin': 'https://www.youtube.com',
-      'referer': 'https://www.youtube.com',
-      'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip'
+      'referer': 'https://www.youtube.com'
     };
 
     try {

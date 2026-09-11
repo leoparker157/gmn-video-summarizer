@@ -837,21 +837,29 @@
             if (!allFormats.length) return null;
 
             let fmt = null;
+            // Check for formats with direct URL (preferred) or signatureCipher (needs decoding)
+            const hasUrl = (f) => !!(f.url || f.signatureCipher);
             if (!isAudioOnly) {
               // Try requested quality first
-              if (quality === '1080p') fmt = allFormats.find(f => f.url && f.qualityLabel && f.qualityLabel.includes('1080'));
-              else if (quality === '720p') fmt = allFormats.find(f => f.url && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
-              else if (quality === '480p') fmt = allFormats.find(f => f.url && f.qualityLabel && f.qualityLabel.includes('480'));
-              else if (quality === '360p') fmt = allFormats.find(f => f.url && f.itag === 18);
+              if (quality === '1080p') fmt = allFormats.find(f => hasUrl(f) && f.qualityLabel && f.qualityLabel.includes('1080'));
+              else if (quality === '720p') fmt = allFormats.find(f => hasUrl(f) && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
+              else if (quality === '480p') fmt = allFormats.find(f => hasUrl(f) && f.qualityLabel && f.qualityLabel.includes('480'));
+              else if (quality === '360p') fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
               // Fallback hierarchy
-              if (!fmt) fmt = allFormats.find(f => f.url && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
-              if (!fmt) fmt = allFormats.find(f => f.url && f.itag === 18);
-              if (!fmt) fmt = allFormats.find(f => f.url && f.mimeType && f.mimeType.startsWith('video/'));
+              if (!fmt) fmt = allFormats.find(f => hasUrl(f) && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
+              if (!fmt) fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
+              if (!fmt) fmt = allFormats.find(f => hasUrl(f) && f.mimeType && f.mimeType.startsWith('video/'));
             } else {
-              fmt = allFormats.find(f => f.url && f.mimeType && f.mimeType.startsWith('audio/'));
-              if (!fmt) fmt = allFormats.find(f => f.url && f.itag === 18);
+              fmt = allFormats.find(f => hasUrl(f) && f.mimeType && f.mimeType.startsWith('audio/'));
+              if (!fmt) fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
             }
-            if (fmt && fmt.url) {
+            if (fmt && (fmt.url || fmt.signatureCipher)) {
+              // If format only has signatureCipher (no plain url), we can't use it directly
+              // from the page player — need Innertube to decode it
+              if (!fmt.url && fmt.signatureCipher) {
+                console.log('[GVC] Page player format has signatureCipher only (itag=' + fmt.itag + '), need Innertube to decode');
+                return null;
+              }
               console.log('[GVC] Found stream from page player (' + source + '): itag=' + fmt.itag + ' quality=' + (fmt.qualityLabel || 'N/A'));
               return fmt;
             }
@@ -911,8 +919,8 @@
             return;
           }
 
-          // ── Fallback: Innertube (may fail with BotGuard) ──────────────────
-          console.log('[GVC] Page player had no usable streams, falling back to Innertube...');
+          // ── Fallback: Innertube with WEB client (uses page cookies for auth) ──
+          console.log('[GVC] Page player had no usable streams, falling back to Innertube WEB client...');
           let InnertubeClass = window.Innertube || globalThis.Innertube;
           if (!InnertubeClass) {
             for (let i = 0; i < 30; i++) {
@@ -924,8 +932,10 @@
           if (!InnertubeClass) {
             throw new Error('YouTube.js engine not loaded in page');
           }
-          const yt = await InnertubeClass.create({ client_type: 'ANDROID' });
-          const info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
+          // Use WEB client so the page's cookies (signed-in session) are recognized
+          // ANDROID client ignores browser cookies and acts as anonymous
+          const yt = await InnertubeClass.create();
+          const info = await yt.getBasicInfo(videoId);
           const formats = (info.streaming_data?.formats || []).concat(info.streaming_data?.adaptive_formats || []);
 
           let selectedFormat = null;
