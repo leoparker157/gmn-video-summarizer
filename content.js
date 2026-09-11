@@ -158,6 +158,7 @@ const DEFAULT_SETTINGS = {
   gic_v_jb_braille: false,
   gic_v_jb_forge: false,
   gic_v_jb_seed: false,
+  gic_v_overlay_settings_open: false,
   gic_v_jb_cot_text: DEF_COT,
   gic_v_jb_ctx_text: DEF_CTX,
   gic_v_jb_forge_text: DEF_FORGE,
@@ -442,7 +443,8 @@ const S = {
   ...DEFAULT_SETTINGS,
   ...(presets[activePresetName] || {}),
   ...rawStored,
-  gic_v_adv_tools_open: isNewUserOrDefault ? false : !!rawStored.gic_v_adv_tools_open
+  gic_v_adv_tools_open: isNewUserOrDefault ? false : !!rawStored.gic_v_adv_tools_open,
+  gic_v_overlay_settings_open: isNewUserOrDefault ? false : !!rawStored.gic_v_overlay_settings_open
 };
 if (!S.gic_v_system) {
   S.gic_v_system = DEF_SYSTEM;
@@ -2507,12 +2509,17 @@ if (box) {
 
 
       <div class="gvc-divider"></div>
-      <div class="gvc-section-title">🔘 Button Overlay Settings</div>
-      <div class="gvc-cb-row">
-        <input type="checkbox" id="gvc-v-show-badge" ${chk(S.gic_v_show_video_badge !== false)}>
-        <label for="gvc-v-show-badge">Show "Summarize Video" button on video players <span class="gvc-saved" id="gvc-v-show-badge-saved">Saved</span></label>
+      <div class="gvc-collapsible-header" id="gvc-overlay-settings-toggle" title="Click to show or hide Button Overlay Settings">
+        <span class="gvc-section-title">🔘 Button Overlay Settings</span>
+        <span class="gvc-collapsible-arrow" id="gvc-overlay-settings-arrow">${S.gic_v_overlay_settings_open ? '▼' : '▶'}</span>
       </div>
-      <div style="font-size:11px;color:#71767b;margin-top:3px;margin-bottom:8px;">When disabled, buttons on video players are hidden. You can still summarize by right-clicking any video.</div>
+      <div id="gvc-overlay-settings-panel" style="display:${S.gic_v_overlay_settings_open ? 'block' : 'none'};margin-top:6px;">
+        <div class="gvc-cb-row">
+          <input type="checkbox" id="gvc-v-show-badge" ${chk(S.gic_v_show_video_badge !== false)}>
+          <label for="gvc-v-show-badge">Show "Summarize Video" button on video players <span class="gvc-saved" id="gvc-v-show-badge-saved">Saved</span></label>
+        </div>
+        <div style="font-size:11px;color:#71767b;margin-top:3px;margin-bottom:8px;">When disabled, buttons on video players are hidden. You can still summarize by right-clicking any video.</div>
+      </div>
 
     </div>
 
@@ -2676,6 +2683,7 @@ function getSettingsFromUI() {
     gic_v_show_video_badge: el('gvc-v-show-badge') ? el('gvc-v-show-badge').checked : (S.gic_v_show_video_badge !== false),
     gic_v_preferred_quality: S.gic_v_preferred_quality || 'auto',
     gic_v_adv_tools_open: false,
+    gic_v_overlay_settings_open: el('gvc-overlay-settings-panel') ? (el('gvc-overlay-settings-panel').style.display !== 'none') : false,
   };
 }
 
@@ -2690,6 +2698,14 @@ function applySettingsToUI(cfg) {
   const isAdvOpen = cfg.gic_v_adv_tools_open === true;
   if (advPanel) advPanel.style.display = isAdvOpen ? 'block' : 'none';
   if (advArrow) advArrow.textContent = isAdvOpen ? '▼' : '▶';
+
+  if (cfg.gic_v_overlay_settings_open != null) {
+    const overlayPanel = el('gvc-overlay-settings-panel');
+    const overlayArrow = el('gvc-overlay-settings-arrow');
+    const isOverlayOpen = cfg.gic_v_overlay_settings_open === true;
+    if (overlayPanel) overlayPanel.style.display = isOverlayOpen ? 'block' : 'none';
+    if (overlayArrow) overlayArrow.textContent = isOverlayOpen ? '▼' : '▶';
+  }
 
   if (cfg.gic_v_preferred_quality != null) {
     if (el('gvc-v-quality-pref')) el('gvc-v-quality-pref').value = cfg.gic_v_preferred_quality;
@@ -3597,6 +3613,19 @@ if (box) {
       if (advArrow) advArrow.textContent = isCurrentlyOpen ? '▶' : '▼';
       store.set({ gic_v_adv_tools_open: !isCurrentlyOpen });
       S.gic_v_adv_tools_open = !isCurrentlyOpen;
+    };
+  }
+
+  const overlayToggle = el('gvc-overlay-settings-toggle');
+  const overlayPanel = el('gvc-overlay-settings-panel');
+  const overlayArrow = el('gvc-overlay-settings-arrow');
+  if (overlayToggle && overlayPanel) {
+    overlayToggle.onclick = () => {
+      const isCurrentlyOpen = overlayPanel.style.display !== 'none';
+      overlayPanel.style.display = isCurrentlyOpen ? 'none' : 'block';
+      if (overlayArrow) overlayArrow.textContent = isCurrentlyOpen ? '▶' : '▼';
+      store.set({ gic_v_overlay_settings_open: !isCurrentlyOpen });
+      S.gic_v_overlay_settings_open = !isCurrentlyOpen;
     };
   }
 
