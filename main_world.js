@@ -743,6 +743,14 @@
       try { availableQualityLevels = player.getAvailableQualityLevels() || []; } catch (_) {}
     }
 
+    const progressiveFormats = (playerResponse && playerResponse.streamingData && playerResponse.streamingData.formats) || [];
+    const progressiveQualities = progressiveFormats
+      .map(f => f.qualityLabel || (f.height ? `${f.height}p` : (f.itag === 18 ? '360p' : (f.itag === 22 ? '720p' : null))))
+      .filter(Boolean);
+    if (progressiveQualities.length === 0) {
+      progressiveQualities.push('360p');
+    }
+
     return {
       videoId,
       canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
@@ -751,7 +759,8 @@
       currentTime: Math.round(currentTime),
       audioStreams,
       videoStreams,
-      availableQualityLevels
+      availableQualityLevels,
+      progressiveQualities
     };
   }
 
@@ -787,6 +796,18 @@
           }
         } catch (_) {}
       }
+    } else if (e.data.type === 'GVC_SEEK_PLAYER') {
+      const sec = parseFloat(e.data.seconds);
+      if (!isNaN(sec) && sec >= 0) {
+        const player = document.getElementById('movie_player');
+        if (player && typeof player.seekTo === 'function') {
+          try { player.seekTo(sec, true); } catch (_) {}
+        }
+        const v = document.querySelector('video');
+        if (v) {
+          try { v.currentTime = sec; v.play(); } catch (_) {}
+        }
+      }
     } else if (e.data.type === 'GVC_RESOLVE_YOUTUBE_STREAM') {
       const { videoId, quality = '360p', mediaType = 'video', queryId } = e.data;
       (async () => {
@@ -820,9 +841,16 @@
               selectedFormat = formats.find(f => f.itag === 18 && f.url);
             }
 
+            // Fallback hierarchy if requested resolution lacks a direct combined stream
             if (!selectedFormat) {
-              selectedFormat = formats.find(f => (f.itag === 18 || f.itag === 22) && f.url) ||
-                               formats.find(f => f.has_video && f.url);
+              if (quality === '720p' || quality === '480p' || quality === '1080p') {
+                selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && f.url);
+              }
+              if (!selectedFormat) {
+                selectedFormat = formats.find(f => f.itag === 18 && f.url) ||
+                                 formats.find(f => (f.itag === 18 || f.itag === 22) && f.url) ||
+                                 formats.find(f => f.has_video && f.url);
+              }
             }
           } else {
             selectedFormat = formats.find(f => f.has_audio && !f.has_video && f.url) ||
@@ -837,6 +865,7 @@
           const streamUrl = `${selectedFormat.url}&cpn=${cpn}`;
           const totalLength = parseInt(selectedFormat.content_length, 10) || 0;
           const actualQuality = selectedFormat.quality_label || (selectedFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
+          const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
           const videoTitle = info.basic_info?.title || document.title.replace(' - YouTube', '');
 
           window.postMessage({
@@ -846,9 +875,10 @@
             streamUrl,
             totalLength,
             actualQuality,
+            requestedQuality: quality,
+            isQualityFallback,
             videoTitle,
-            itag: selectedFormat.itag,
-            isQualityFallback: (quality === '1080p' || quality === '720p' || quality === '480p') && selectedFormat.itag === 18
+            itag: selectedFormat.itag
           }, '*');
         } catch (err) {
           window.postMessage({

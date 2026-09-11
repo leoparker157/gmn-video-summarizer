@@ -20,29 +20,39 @@ const btnClearExpired = document.getElementById('btn-clear-expired');
 // Unified storage helper — reads/writes directly from chrome.storage.local (same storage as content.js)
 const store = {
   get: (keys) => new Promise((resolve) => {
-    chrome.storage.local.get(keys, (localRes) => {
-      if (chrome.runtime.lastError) {
-        if (chrome.storage && chrome.storage.sync) {
-          chrome.storage.sync.get(keys, resolve);
+    if (!chrome.runtime?.id) { resolve({}); return; }
+    try {
+      chrome.storage.local.get(keys, (localRes) => {
+        if (chrome.runtime?.lastError) {
+          if (chrome.storage && chrome.storage.sync) {
+            chrome.storage.sync.get(keys, resolve);
+          } else {
+            resolve({});
+          }
         } else {
-          resolve({});
+          // Fallback/merge any keys that might have been saved to sync
+          if (chrome.storage && chrome.storage.sync) {
+            chrome.storage.sync.get(keys, (syncRes) => {
+              resolve({ ...(syncRes || {}), ...(localRes || {}) });
+            });
+          } else {
+            resolve(localRes || {});
+          }
         }
-      } else {
-        // Fallback/merge any keys that might have been saved to sync
-        if (chrome.storage && chrome.storage.sync) {
-          chrome.storage.sync.get(keys, (syncRes) => {
-            resolve({ ...(syncRes || {}), ...(localRes || {}) });
-          });
-        } else {
-          resolve(localRes || {});
-        }
-      }
-    });
+      });
+    } catch (_) {
+      resolve({});
+    }
   }),
   set: (obj) => new Promise((resolve) => {
-    chrome.storage.local.set(obj, () => {
+    if (!chrome.runtime?.id) { resolve(); return; }
+    try {
+      chrome.storage.local.set(obj, () => {
+        resolve();
+      });
+    } catch (_) {
       resolve();
-    });
+    }
   })
 };
 
@@ -108,6 +118,11 @@ function extractPlatformInfo(url) {
   return { platform: 'Web Video', icon: '🌐' };
 }
 
+function isGoogleFilesUri(uri) {
+  if (!uri || typeof uri !== 'string') return false;
+  return uri.includes('files/') || uri.includes('generativelanguage.googleapis.com');
+}
+
 function formatRemainingTime(expiresAt) {
   if (!expiresAt) return { text: '⚡ Active on API', isExpired: false };
   const diffMs = expiresAt - Date.now();
@@ -155,6 +170,10 @@ async function getStorageHistory() {
     }
   }
 
+  const keyData = await store.get(['gvc_api_key', 'gic_v_api_key']);
+  const activeKey = keyData?.gvc_api_key || keyData?.gic_v_api_key || '';
+  currentActiveApiKeyLast4 = (activeKey && typeof activeKey === 'string') ? activeKey.trim().slice(-4) : '';
+
   if (updated) {
     history.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     await store.set({ gvc_storage_history: history });
@@ -164,6 +183,8 @@ async function getStorageHistory() {
   updateBadge(history.length);
   return history;
 }
+
+let currentActiveApiKeyLast4 = '';
 
 function updateBadge(count) {
   if (historyBadge) {
@@ -186,16 +207,20 @@ function renderHistory(items) {
   }
 
   histList.innerHTML = items.map((item) => {
-    const timeInfo = formatRemainingTime(item.expiresAt);
+    const isGoogleFile = item.fileUri && isGoogleFilesUri(item.fileUri);
+    const isCloud = item.isCloudDirect || !isGoogleFile || item.sizeMB === '0';
+    const timeInfo = isCloud ? { text: '⚡ Cloud Direct', isExpired: false } : formatRemainingTime(item.expiresAt);
     const platInfo = extractPlatformInfo(item.pageUrl || item.cleanUrl);
     const resourceName = item.fileResourceName || (item.fileUri ? (item.fileUri.match(/files\/[a-zA-Z0-9_-]+/) || [])[0] : 'files/...');
+    const isKeyMatch = !isGoogleFile ? true : (item.apiKeyLast4 && currentActiveApiKeyLast4 && item.apiKeyLast4.toLowerCase() === currentActiveApiKeyLast4.toLowerCase());
 
     return `
       <div class="hist-card" data-id="${esc(item.id)}" data-uri="${esc(item.fileUri)}">
         <div class="hist-card-hdr">
           <div class="hist-tags">
             <span class="hist-tag hist-tag-plat">${esc(platInfo.icon)} ${esc(platInfo.platform)}</span>
-            <span class="hist-tag hist-tag-size">${esc(item.sizeMB || '0')} MB</span>
+            <span class="hist-tag hist-tag-size" style="${isCloud ? 'color:#00ba7c;font-weight:600;border-color:rgba(0,186,124,0.4);background:rgba(0,186,124,0.1);' : ''}">${isCloud ? '⚡ Cloud Direct' : `${esc(item.sizeMB || '0')} MB`}</span>
+            ${item.apiKeyLast4 ? `<span class="hist-tag hist-tag-key" style="${isKeyMatch ? 'border-color:rgba(0,186,124,0.4);color:#00ba7c;' : 'border-color:rgba(245,158,11,0.5);color:#fcd34d;background:rgba(245,158,11,0.15);'}" title="${isKeyMatch ? `Uploaded with active Gemini API key ending in ...${esc(item.apiKeyLast4)}` : `Uploaded with Gemini API key ending in ...${esc(item.apiKeyLast4)} (Active key: ...${esc(currentActiveApiKeyLast4)} - Re-upload required)`}">${isKeyMatch ? `🔑 ••••${esc(item.apiKeyLast4)}` : `⚠️ ••••${esc(item.apiKeyLast4)} (Mismatch)`}</span>` : ''}
           </div>
           <span class="hist-tag ${timeInfo.isExpired ? 'hist-tag-expired' : 'hist-tag-time'}">${esc(timeInfo.text)}</span>
         </div>
@@ -245,6 +270,9 @@ async function loadAndRenderHistory() {
 async function loadItemAndPrepare(item) {
   if (!item) return;
 
+  const isGoogleFile = item.fileUri && (item.fileUri.includes('files/') || item.fileUri.includes('generativelanguage.googleapis.com'));
+  const isCloud = item.isCloudDirect || !isGoogleFile || item.sizeMB === '0';
+
   // Store preparation target in storage for robust cross-navigation persistence
   await store.set({
     gvc_prepare_target: {
@@ -255,6 +283,9 @@ async function loadItemAndPrepare(item) {
       pageTitle: item.pageTitle,
       cleanUrl: item.cleanUrl,
       videoId: item.videoId,
+      platform: item.platform,
+      isCloudDirect: isCloud,
+      apiKeyLast4: item.apiKeyLast4 || '',
       createdAt: Date.now()
     }
   });
@@ -401,8 +432,23 @@ if (btnVerifyHistory) {
 
     const verified = [];
     for (const item of history) {
+      if (!item) continue;
+      const isGoogleFile = item.fileUri && isGoogleFilesUri(item.fileUri);
+      if (!isGoogleFile || item.isCloudDirect) {
+        verified.push(item);
+        continue;
+      }
+      const isKeyMatch = !item.apiKeyLast4 || (currentActiveApiKeyLast4 && item.apiKeyLast4.toLowerCase() === currentActiveApiKeyLast4.toLowerCase());
+      if (!isKeyMatch) {
+        // Belongs to another API key project and cannot be verified with the active key: preserve it!
+        verified.push(item);
+        continue;
+      }
       const resName = item.fileResourceName || (item.fileUri ? (item.fileUri.match(/files\/[a-zA-Z0-9_-]+/) || [])[0] : null);
-      if (!resName) continue;
+      if (!resName) {
+        verified.push(item);
+        continue;
+      }
       try {
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${resName}?key=${encodeURIComponent(apiKey)}`);
         if (res.ok) {
@@ -433,7 +479,7 @@ if (btnClearExpired) {
   btnClearExpired.addEventListener('click', async () => {
     const history = await getStorageHistory();
     const now = Date.now();
-    const valid = history.filter(h => !h.expiresAt || (h.expiresAt > now));
+    const valid = history.filter(h => !h || h.isCloudDirect || !isGoogleFilesUri(h.fileUri) || !h.expiresAt || (h.expiresAt > now));
     await store.set({ gvc_storage_history: valid });
     cachedHistoryItems = valid;
     updateBadge(valid.length);
@@ -460,12 +506,21 @@ async function initPopup() {
 // Live Storage Updates
 if (chrome.storage && chrome.storage.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && (changes.gvc_storage_history || changes.gvc_url_cache)) {
-      getStorageHistory().then((items) => {
+    if (areaName === 'local' || areaName === 'sync') {
+      if (changes.gic_v_api_key || changes.gvc_api_key) {
+        const newKey = (changes.gic_v_api_key?.newValue || changes.gvc_api_key?.newValue || '').trim();
+        currentActiveApiKeyLast4 = newKey ? newKey.slice(-4) : '';
         if (panelHistory && panelHistory.classList.contains('active')) {
-          renderHistory(items);
+          renderHistory(cachedHistoryItems);
         }
-      });
+      }
+      if (changes.gvc_storage_history || changes.gvc_url_cache) {
+        getStorageHistory().then((items) => {
+          if (panelHistory && panelHistory.classList.contains('active')) {
+            renderHistory(items);
+          }
+        });
+      }
     }
   });
 }

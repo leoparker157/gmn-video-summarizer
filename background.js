@@ -105,17 +105,23 @@ function transmuxTsBuffersToMp4(tsBuffers) {
                               (typeof muxjs !== 'undefined' && muxjs.mp4 && muxjs.mp4.Transmuxer);
 
       if (!TransmuxerClass) {
+        console.warn('[GVC Transmuxer] mux.js Transmuxer not available');
         resolve(null);
         return;
       }
 
-      const transmuxer = new TransmuxerClass({ keepOriginalTimestamps: true });
-      const initSegments = [];
+      // Normalize timestamps to start at 0:00 for Google Gemini Files API ingestion
+      const transmuxer = new TransmuxerClass({
+        keepOriginalTimestamps: false,
+        baseMediaDecodeTime: 0
+      });
+      let initSegment = null;
       const mediaSegments = [];
 
       transmuxer.on('data', (segment) => {
-        if (segment.initSegment && segment.initSegment.byteLength > 0) {
-          initSegments.push(new Uint8Array(segment.initSegment));
+        // Retain only the first valid initSegment (ftyp + moov) to prevent corrupt duplicate headers
+        if (!initSegment && segment.initSegment && segment.initSegment.byteLength > 0) {
+          initSegment = new Uint8Array(segment.initSegment);
         }
         if (segment.data && segment.data.byteLength > 0) {
           mediaSegments.push(new Uint8Array(segment.data));
@@ -123,11 +129,12 @@ function transmuxTsBuffersToMp4(tsBuffers) {
       });
 
       transmuxer.on('done', () => {
-        const allChunks = [...initSegments, ...mediaSegments];
-        if (allChunks.length === 0) {
+        if (!initSegment || mediaSegments.length === 0) {
+          console.warn('[GVC Transmuxer] Transmux produced no valid initSegment or media frames');
           resolve(null);
           return;
         }
+        const allChunks = [initSegment, ...mediaSegments];
         const totalLength = allChunks.reduce((acc, c) => acc + c.length, 0);
         const mp4Buffer = new Uint8Array(totalLength);
         let offset = 0;
@@ -138,10 +145,16 @@ function transmuxTsBuffersToMp4(tsBuffers) {
         resolve(mp4Buffer.buffer);
       });
 
+      let pushedAny = false;
       for (const buf of tsBuffers) {
         if (buf && buf.byteLength > 0) {
           transmuxer.push(new Uint8Array(buf));
+          pushedAny = true;
         }
+      }
+      if (!pushedAny) {
+        resolve(null);
+        return;
       }
       transmuxer.flush();
     } catch (err) {
@@ -391,15 +404,25 @@ if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
 
 // ── Context Menu ─────────────────────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "gvc-summarize-video",
-    title: "✨ Summarize / Caption This Video (Gemini)",
-    contexts: ["video", "all"]
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "gvc-summarize-video",
+      title: "✨ Summarize / Caption This Video (Gemini)",
+      contexts: ["video", "all"]
+    });
   });
 });
 
 // ── Forward Messages between Frames (e.g. Iframe Badge -> Top Frame Panel) ───
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'CHECK_NETWORK') {
+    checkNetworkHealth().then(health => {
+      try { sendResponse({ health }); } catch (_) {}
+    }).catch(err => {
+      try { sendResponse({ health: { ok: false, reason: err.message, userMessage: 'Failed to probe connection.' } }); } catch (_) {}
+    });
+    return true; // asynchronous response
+  }
   if (msg && msg.type === 'FORWARD_TO_TOP_FRAME' && sender && sender.tab && sender.tab.id != null) {
     chrome.tabs.sendMessage(sender.tab.id, msg.payload, { frameId: 0 }, () => {
       void chrome.runtime.lastError;
@@ -545,7 +568,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const meta = await probeStreamMetadata(msg.url);
         send({ type: 'METADATA_RESULT', url: msg.url, meta });
       } else if (msg.type === 'DOWNLOAD') {
-        await handleDownload(msg.url, send, portSessions, tabId, msg.referer);
+        await handleDownload(msg.url, send, portSessions, tabId, msg.referer, msg.autoUpload, msg.apiKey);
       } else if (msg.type === 'ATTACH_DOWNLOAD') {
         const cleanUrl = cleanMediaUrl(msg.url);
         const session = ACTIVE_DOWNLOADS.get(cleanUrl);
@@ -569,10 +592,13 @@ chrome.runtime.onConnect.addListener((port) => {
         await handleIngestBlob(msg, send, portSessions, tabId);
       } else if (msg.type === 'ANALYZE') {
         if (msg.sessionId) portSessions.add(msg.sessionId);
-        await handleAnalyze(msg, send);
+        await handleAnalyze(msg, send, portSessions, tabId);
       } else if (msg.type === 'ANALYZE_YOUTUBE_DIRECT') {
         if (msg.sessionId) portSessions.add(msg.sessionId);
         await handleAnalyzeYouTubeDirect(msg, send);
+      } else if (msg.type === 'UPLOAD_SESSION') {
+        if (msg.sessionId) portSessions.add(msg.sessionId);
+        await handleUploadSession(msg, send);
       } else if (msg.type === 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM') {
         await handleDownloadResolvedYouTubeStream(msg, send, portSessions, tabId);
       } else if (msg.type === 'YOUTUBE_JS_DOWNLOAD') {
@@ -592,6 +618,9 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } else if (msg.type === 'FETCH_MODELS') {
         await handleFetchModels(msg.apiKey, send);
+      } else if (msg.type === 'CHECK_NETWORK') {
+        const health = await checkNetworkHealth();
+        send({ type: 'NETWORK_HEALTH_RESULT', health });
       }
     } catch (e) {
       send({ type: 'ERROR', message: e.message });
@@ -614,32 +643,6 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// ── Ingest Blob (From Recorded Streams or Local Player Buffers) ────────────────
-async function handleIngestBlob({ base64Data, mimeType, label }, send, portSessions) {
-  send({ type: 'PROGRESS', message: 'Processing in-memory video stream...' });
-
-  const byteCharacters = atob(base64Data);
-  const byteNumbers = new Array(byteCharacters.length);
-  for (let i = 0; i < byteCharacters.length; i++) {
-    byteNumbers[i] = byteCharacters.charCodeAt(i);
-  }
-  const byteArray = new Uint8Array(byteNumbers);
-  const detectedMime = detectVideoMimeType(byteArray.buffer) || mimeType || 'video/mp4';
-  const blob = new Blob([byteArray], { type: detectedMime });
-
-  const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
-  if (blob.size > MAX_VIDEO_SIZE_BYTES) {
-    throw new Error(`Video file is too large (${sizeMB} MB). Google Gemini Files API supports a maximum file size of 2 GB (2048 MB). Please select a lower quality variant or record a shorter clip.`);
-  }
-
-  const sessionId = crypto.randomUUID();
-  SESSIONS[sessionId] = { blob, sizeMB, fileUri: null, videoUrl: null, label: label || 'Recorded Video', createdAt: Date.now() };
-  if (portSessions) portSessions.add(sessionId);
-
-  send({ type: 'DOWNLOAD_DONE', sessionId, sizeMB, url: null });
-}
-
-// ── DeclarativeNetRequest Dynamic Rules for CDN Anti-Hotlinking Bypass ────────
 async function configureCdnBypassRules(targetUrl, refererUrl) {
   if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
   try {
@@ -761,13 +764,23 @@ function getSegmentIv(keyInfo, seqIndex) {
 }
 
 // ── Decrypt AES-128 HLS Segment using Web Crypto API ──────────────────────────
-async function decryptChunk(encryptedBuffer, keyInfo, seqIndex) {
+async function decryptChunk(encryptedBuffer, keyInfo, seqIndex, tabId = null) {
   let cryptoKey = HLS_KEY_CACHE.get(keyInfo.keyUri);
   if (!cryptoKey) {
-    const keyRes = await fetchWithRetry(keyInfo.keyUri, 3);
-    const keyRaw = await keyRes.arrayBuffer();
+    let keyRaw = null;
+    try {
+      const keyRes = await fetchWithRetry(keyInfo.keyUri, 3);
+      keyRaw = await keyRes.arrayBuffer();
+    } catch (keyErr) {
+      if (tabId != null) {
+        keyRaw = await fetchChunkViaTab(tabId, keyInfo.keyUri);
+      }
+      if (!keyRaw) {
+        throw new Error('Failed to fetch AES-128 encryption key from ' + keyInfo.keyUri + ': ' + keyErr.message);
+      }
+    }
     if (keyRaw.byteLength !== 16) {
-      throw new Error(`Invalid AES-128 key length (${keyRaw.byteLength} bytes)`);
+      throw new Error('Invalid AES-128 key length (' + keyRaw.byteLength + ' bytes)');
     }
     cryptoKey = await crypto.subtle.importKey(
       'raw',
@@ -792,9 +805,14 @@ function detectVideoMimeType(buffer) {
   if (!buffer || buffer.byteLength < 8) return 'video/mp4';
   const u8 = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 1024));
 
-  // Check for WebM / MKV (EBML: 0x1A 0x45 0xDF 0xA3)
+  // Check for WebM / MKU (EBML: 0x1A 0x45 0xDF 0xA3)
   if (u8[0] === 0x1A && u8[1] === 0x45 && u8[2] === 0xDF && u8[3] === 0xA3) {
     return 'video/webm';
+  }
+
+  // Check for MPEG-2 TS (Sync byte 0x47 or ID3 header)
+  if (u8[0] === 0x47 || (u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33)) {
+    return 'video/mp2t';
   }
 
   // Universal standard accepted by Google Gemini Files API
@@ -837,11 +855,23 @@ function cleanTsChunk(buffer) {
 }
 
 // ── High-Performance HLS Manifest Parser (Master & Media Playlists) ───────────
-async function parseHlsManifest(manifestUrl) {
+async function parseHlsManifest(manifestUrl, tabId = null) {
   const cleanUrl = cleanMediaUrl(manifestUrl);
-  const res = await fetchWithRetry(cleanUrl, 3);
-  const text = await res.text();
-  const baseUrl = res.url || cleanUrl; // Use final redirected URL for relative segment paths
+  let text = '';
+  let baseUrl = cleanUrl;
+  try {
+    const res = await fetchWithRetry(cleanUrl, 3);
+    text = await res.text();
+    baseUrl = res.url || cleanUrl; // Use final redirected URL for relative segment paths
+  } catch (err) {
+    if (tabId != null) {
+      const tabBuf = await fetchChunkViaTab(tabId, cleanUrl);
+      if (tabBuf && tabBuf.byteLength > 0) {
+        text = new TextDecoder().decode(tabBuf);
+      }
+    }
+    if (!text) throw err;
+  }
 
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
 
@@ -1003,12 +1033,12 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
     send({ type: 'PROGRESS', message: 'Video stream already downloaded and cached in memory!' });
     send(session.result);
     if (portSessions) portSessions.add(session.result.sessionId);
-    return;
+    return session.result;
   }
 
   send({ type: 'PROGRESS', message: 'Analyzing HLS / MPEG-TS stream playlist...' });
 
-  let manifest = (session && session.manifest) ? session.manifest : await parseHlsManifest(url);
+  let manifest = (session && session.manifest) ? session.manifest : await parseHlsManifest(url, tabId);
 
   if (manifest.isMaster) {
     if (!manifest.variants || manifest.variants.length === 0) {
@@ -1019,7 +1049,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       type: 'PROGRESS',
       message: `Found ${manifest.variants.length} quality variants. Selected ${selectedVariant.label || 'highest'} quality...`
     });
-    manifest = await parseHlsManifest(selectedVariant.url);
+    manifest = await parseHlsManifest(selectedVariant.url, tabId);
   }
 
   if (!manifest.segments || manifest.segments.length === 0) {
@@ -1115,15 +1145,6 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       try {
         const chunkRes = await fetchWithRetry(seg.url, 3, 12000);
         chunkBuffer = await chunkRes.arrayBuffer();
-
-        if (seg.key && seg.key.method === 'AES-128') {
-          try {
-            chunkBuffer = await decryptChunk(chunkBuffer, seg.key, seg.seqIndex);
-          } catch (decErr) {
-            console.warn(`[GVC HLS] Failed to decrypt segment #${idx + 1}:`, decErr);
-            chunkBuffer = null;
-          }
-        }
       } catch (fetchErr) {
         // If background fetch failed (e.g. 403 Forbidden), fetch directly through the player tab/iframe!
         if (tabId != null) {
@@ -1135,14 +1156,24 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
           } catch (_) {}
         }
         if (!chunkBuffer) {
-          console.warn(`[GVC HLS] Segment #${idx + 1} unavailable (${fetchErr.message}).`);
+          console.warn('[GUC HLS] Segment #${idx + 1} unavailable (${fetchErr.message}).');
         }
       } finally {
         session.inFlight.delete(idx);
       }
 
+      // Decrypt AES-128 chunks (works whether fetched directly or via tab session)
+      if (chunkBuffer && seg.key && seg.key.method === 'AES-128') {
+        try {
+          chunkBuffer = await decryptChunk(chunkBuffer, seg.key, seg.seqIndex, tabId);
+        } catch (decErr) {
+          console.warn(`[GVC HLS] Failed to decrypt segment #${idx + 1}:`, decErr);
+          chunkBuffer = null;
+        }
+      }
+
       if (chunkBuffer && chunkBuffer.byteLength > 0) {
-        const isTs = !manifest.initSegmentUrl && (detectVideoMimeType(chunkBuffer) === 'video/mp2t');
+        const isTs = !manifest.initSegmentUrl || (detectVideoMimeType(chunkBuffer) === 'video/mp2t');
         const readyBuffer = isTs ? cleanTsChunk(chunkBuffer) : chunkBuffer;
         if (readyBuffer && readyBuffer.byteLength > 0) {
           session.downloadedChunks[idx] = readyBuffer;
@@ -1191,7 +1222,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
     if (mp4ArrayBuffer && mp4ArrayBuffer.byteLength > 0) {
       blob = new Blob([mp4ArrayBuffer], { type: 'video/mp4' });
     } else {
-      blob = new Blob(validChunks, { type: 'video/mp4' });
+      throw new Error('Failed to transmux HLS video chunks into playable MP4. Please select a different quality variant.');
     }
   }
 
@@ -1222,9 +1253,11 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
     sizeMB,
     url: cleanUrl
   };
+  ACTIVE_DOWNLOADS.set(cleanUrl, session);
 
   broadcast(session.result);
   stopKeepAlive();
+  return session.result;
 }
 
 // ── Probe HLS Manifest from a TS Chunk URL ─────────────────────────────────
@@ -1399,9 +1432,10 @@ async function handleSequentialChunkDownload(firstUrl, pattern, send, portSessio
 
   send({ type: 'PROGRESS', message: `Assembling and transmuxing ${downloadedChunks.length} TS chunks into playable MP4...` });
   const mp4ArrayBuffer = await transmuxTsBuffersToMp4(downloadedChunks);
-  const blob = (mp4ArrayBuffer && mp4ArrayBuffer.byteLength > 0)
-    ? new Blob([mp4ArrayBuffer], { type: 'video/mp4' })
-    : new Blob(downloadedChunks, { type: 'video/mp4' });
+  if (!mp4ArrayBuffer || mp4ArrayBuffer.byteLength === 0) {
+    throw new Error('Failed to transmux TS chunks into playable MP4. Please select a different quality variant.');
+  }
+  const blob = new Blob([mp4ArrayBuffer], { type: 'video/mp4' });
   const sizeMB = (blob.size / (1024 * 1024)).toFixed(1);
   if (blob.size > MAX_VIDEO_SIZE_BYTES) {
     throw new Error(`Video file is too large (${sizeMB} MB). Google Gemini Files API supports a maximum file size of 2 GB (2048 MB). Please select a lower resolution variant.`);
@@ -1419,12 +1453,19 @@ async function handleSequentialChunkDownload(firstUrl, pattern, send, portSessio
   };
   if (portSessions) portSessions.add(sessionId);
 
-  send({
+  const dlResult = {
     type: 'DOWNLOAD_DONE',
     sessionId,
     sizeMB,
     url: firstUrl
+  };
+  ACTIVE_DOWNLOADS.set(firstUrl, {
+    status: 'completed',
+    result: dlResult
   });
+
+  send(dlResult);
+  return dlResult;
 }
 
 // ── Ingest In-Memory Recorded Video Blob ─────────────────────────────────────
@@ -1469,7 +1510,7 @@ async function handleIngestBlob(msg, send, portSessions, senderTabId) {
 }
 
 // ── Download Direct Streams (Normalized Full File from Byte 0) ────────────────
-async function handleDownload(url, send, portSessions, tabId, refererUrl) {
+async function handleDownload(url, send, portSessions, tabId, refererUrl, autoUpload, apiKey) {
   const cleanUrl = cleanMediaUrl(url);
 
   if (refererUrl) {
@@ -1477,8 +1518,7 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl) {
   }
 
   if (isHlsStreamUrl(cleanUrl)) {
-    await handleHlsDownload(cleanUrl, send, portSessions, tabId, refererUrl);
-    return;
+    return await handleHlsDownload(cleanUrl, send, portSessions, tabId, refererUrl);
   }
 
   // Check if URL is a TS or M4S chunk
@@ -1490,16 +1530,14 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl) {
     const probedM3u8 = await probeManifestFromTsUrl(cleanUrl);
     if (probedM3u8) {
       send({ type: 'PROGRESS', message: 'Found complete HLS playlist! Downloading all video chunks...' });
-      await handleHlsDownload(probedM3u8, send, portSessions, tabId, refererUrl);
-      return;
+      return await handleHlsDownload(probedM3u8, send, portSessions, tabId, refererUrl);
     }
 
     // Step B: Harvest sequential TS chunks
     const pattern = extractChunkPattern(cleanUrl);
     if (pattern) {
       send({ type: 'PROGRESS', message: 'Harvesting sequential MPEG-TS stream chunks...' });
-      await handleSequentialChunkDownload(cleanUrl, pattern, send, portSessions);
-      return;
+      return await handleSequentialChunkDownload(cleanUrl, pattern, send, portSessions);
     }
   }
 
@@ -1561,11 +1599,21 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl) {
   SESSIONS[sessionId] = { blob, sizeMB, fileUri: null, videoUrl: cleanUrl, createdAt: Date.now() };
   if (portSessions) portSessions.add(sessionId);
 
-  send({ type: 'DOWNLOAD_DONE', sessionId, sizeMB, url: cleanUrl });
+  const dlResult = { type: 'DOWNLOAD_DONE', sessionId, sizeMB, url: cleanUrl };
+  ACTIVE_DOWNLOADS.set(cleanUrl, {
+    status: 'completed',
+    result: dlResult
+  });
+
+  send(dlResult);
+  if (autoUpload && apiKey) {
+    await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send);
+  }
+  return dlResult;
 }
 
 // ── Analyze (Upload → Poll → Generate with Auto-Retry) ───────────────────────
-async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retryCount = 5, retryDelayMs = 2200, payload }, send) {
+async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retryCount = 5, retryDelayMs = 2200, payload }, send, portSessions = null, tabId = null) {
   const abortState = createAbortState(sessionId);
   try {
     startKeepAlive();
@@ -1586,8 +1634,16 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
       } else if (videoUrl) {
         const cleanUrl = cleanMediaUrl(videoUrl);
         if (isHlsStreamUrl(cleanUrl)) {
-          await handleHlsDownload(cleanUrl, send, null);
-          session = SESSIONS[sessionId];
+          const dlResult = await handleHlsDownload(cleanUrl, send, portSessions, tabId);
+          const activeDl = ACTIVE_DOWNLOADS.get(cleanUrl);
+          const effectiveSessionId = dlResult?.sessionId || activeDl?.result?.sessionId;
+          if (effectiveSessionId && SESSIONS[effectiveSessionId]) {
+            sessionId = effectiveSessionId;
+            session = SESSIONS[effectiveSessionId];
+          } else if (sessionId && SESSIONS[sessionId]) {
+            session = SESSIONS[sessionId];
+          }
+          if (portSessions && sessionId) portSessions.add(sessionId);
         } else {
           send({ type: 'PROGRESS', message: 'Restoring video buffer in background...' });
           const res = await fetch(cleanUrl);
@@ -1600,9 +1656,11 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
           session = { blob, sizeMB, fileUri: null, videoUrl: cleanUrl, createdAt: Date.now() };
           SESSIONS[sessionId] = session;
         }
-      } else {
-        throw new Error('Video session expired or buffer lost. Please click "Analyze Video" again.');
       }
+    }
+
+    if (!session) {
+      throw new Error('Video session expired or stream download failed. Please click "🔄 Retry" on the video card to re-fetch the stream.');
     }
 
     if (session.blob && session.blob.size > MAX_VIDEO_SIZE_BYTES) {
@@ -1633,8 +1691,11 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
             session.fileResourceName = null;
           }
         } else {
-          // Link expired (404/400): Invalidate link and notify frontend to prune expired entry
-          send({ type: 'STORAGE_FILE_EXPIRED', fileUri: activeFileUri, fileResourceName });
+          // Link not accessible with THIS key (could be 403 because uploaded with another key, or 404 expired)
+          // Only send STORAGE_FILE_EXPIRED if 404 (file actually deleted from Google Cloud)
+          if (checkRes.status === 404) {
+            send({ type: 'STORAGE_FILE_EXPIRED', fileUri: activeFileUri, fileResourceName });
+          }
           activeFileUri = null;
           fileResourceName = null;
           session.fileUri = null;
@@ -1651,44 +1712,13 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
       if (!session.blob) {
         throw new Error('Video buffer unavailable for Google upload. Please click "🔄 Retry" on the video card to re-fetch the stream.');
       }
-
-      send({ type: 'PROGRESS', message: `Initializing Google Files API upload (${session.sizeMB}MB)...` });
-      const uploadUrl = await initResumableUpload(session.blob, apiKey);
-
-      send({ type: 'PROGRESS', message: 'Uploading video chunks to Google Gemini...' });
-      const uploadResult = await uploadInChunks(session.blob, uploadUrl, apiKey, send);
-      activeFileUri = uploadResult.file.uri;
-      fileResourceName = uploadResult.file.name;
-      fileState = uploadResult.file.state;
-      session.fileResourceName = fileResourceName;
+      activeFileUri = await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send, abortState);
+      fileResourceName = session.fileResourceName;
+      fileState = 'ACTIVE';
     }
-
-    // Step 2: If not already ACTIVE, poll until video reaches ACTIVE state
-    if (fileState !== 'ACTIVE' && fileResourceName) {
-      send({ type: 'PROGRESS', message: 'Gemini is processing video frames...' });
-      try {
-        await pollFileState(fileResourceName, apiKey, send, abortState);
-      } catch (pollErr) {
-        session.fileUri = null;
-        session.fileResourceName = null;
-        throw pollErr;
-      }
-    }
-
-    // Set session fileUri & broadcast only AFTER file is confirmed ACTIVE
-    session.fileUri = activeFileUri;
-    send({
-      type: 'SESSION_FILE_URI',
-      sessionId,
-      fileUri: activeFileUri,
-      fileResourceName: session.fileResourceName,
-      sizeMB: session.sizeMB,
-      videoUrl: session.videoUrl,
-      label: session.label
-    });
 
     // Step 3: Inject File URI and exact MIME type into Payload
-    const containerMime = (session.blob && session.blob.type === 'video/webm') ? 'video/webm' : 'video/mp4';
+    const containerMime = (session?.blob?.type === 'video/webm') ? 'video/webm' : 'video/mp4';
     injectFileUriIntoPayload(payload, activeFileUri, containerMime);
 
     // Step 4: Execute GenerateContent with Auto-Retry (waits until finished or user cancels)
@@ -1818,11 +1848,14 @@ async function handleAnalyzeYouTubeDirect(msg, send) {
 }
 
 // ── Download Resolved YouTube Stream (From In-Page YouTube.js Engine) ────────
-async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, quality, label, videoId, videoTitle }, send, portSessions, tabId) {
+async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, quality, requestedQuality, isQualityFallback, label, videoId, videoTitle, autoUpload, apiKey }, send, portSessions, tabId) {
   startKeepAlive();
   try {
     const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
-    send({ type: 'PROGRESS', message: `Downloading ${quality || 'video'} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...` });
+    const initialMsg = isQualityFallback
+      ? `YouTube direct stream: downloading ${quality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
+      : `Downloading ${quality || 'video'} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
+    send({ type: 'PROGRESS', message: initialMsg });
 
     const boundFetch = (input, init) => globalThis.fetch.call(globalThis, input, init);
     const headers = {
@@ -1869,7 +1902,9 @@ async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, qua
 
     const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
     const sessionId = crypto.randomUUID();
-    const downloadLabel = label || `YouTube (${quality || '360p'})`;
+    const downloadLabel = isQualityFallback
+      ? `YouTube (${quality || '360p'} • Best Available)`
+      : (label || `YouTube (${quality || '360p'})`);
 
     SESSIONS[sessionId] = {
       blob,
@@ -1887,15 +1922,36 @@ async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, qua
       sessionId,
       sizeMB,
       url: `https://www.youtube.com/watch?v=${videoId}`,
-      label: downloadLabel
+      label: downloadLabel,
+      actualQuality: quality || '360p',
+      requestedQuality: requestedQuality || quality || '360p',
+      isQualityFallback: Boolean(isQualityFallback)
     });
+
+    if (autoUpload && apiKey) {
+      await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send);
+    }
+  } catch (err) {
+    if (videoId) {
+      console.warn(`[GVC Background] Stream URL direct fetch failed (${err.message}), falling back to YouTube.js engine...`);
+      send({ type: 'PROGRESS', message: 'Direct stream fetch blocked. Resolving via YouTube.js engine...' });
+      return await handleYouTubeDownloadWithYouTubeJS({
+        videoId,
+        quality: requestedQuality || quality || '360p',
+        mediaType: 'video',
+        label,
+        autoUpload,
+        apiKey
+      }, send, portSessions, tabId);
+    }
+    throw err;
   } finally {
     stopKeepAlive();
   }
 }
 
 // ── YouTube.js Local Download Handler (Mode 2 Fallback) ───────────────────────
-async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', mediaType = 'video', label }, send, portSessions, tabId) {
+async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', mediaType = 'video', label, autoUpload, apiKey }, send, portSessions, tabId) {
   startKeepAlive();
   try {
     send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine (Android Client)...' });
@@ -1995,9 +2051,16 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
         selectedFormat = formats.find(f => f.itag === 18 && f.url);
       }
 
+      // Fallback hierarchy if requested resolution lacks direct combined stream
       if (!selectedFormat) {
-        selectedFormat = formats.find(f => (f.itag === 18 || f.itag === 22) && f.url) ||
-                         formats.find(f => f.has_video && f.url);
+        if (quality === '720p' || quality === '480p' || quality === '1080p') {
+          selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && f.url);
+        }
+        if (!selectedFormat) {
+          selectedFormat = formats.find(f => f.itag === 18 && f.url) ||
+                           formats.find(f => (f.itag === 18 || f.itag === 22) && f.url) ||
+                           formats.find(f => f.has_video && f.url);
+        }
       }
     } else {
       // Audio stream or fallback to itag 18 (which contains full audio track)
@@ -2013,7 +2076,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     const formatLen = parseInt(selectedFormat.content_length, 10) || 0;
 
     const actualQuality = selectedFormat.quality_label || (selectedFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
-    const isQualityFallback = (quality === '1080p' || quality === '720p' || quality === '480p') && selectedFormat.itag === 18;
+    const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
 
     const headers = {
       'accept': '*/*',
@@ -2030,7 +2093,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
 
     const initialMsg = isQualityFallback
-      ? `YouTube direct stream: downloading 360p AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
+      ? `YouTube direct stream: downloading ${actualQuality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
       : `Downloading ${actualQuality} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
     send({ type: 'PROGRESS', message: initialMsg });
 
@@ -2065,7 +2128,9 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
 
     const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
     const sessionId = crypto.randomUUID();
-    const downloadLabel = `YouTube (${selectedFormat.quality_label || (isAudioOnly ? 'Audio' : '360p')})`;
+    const downloadLabel = isQualityFallback
+      ? `YouTube (${actualQuality || '360p'} • Best Available)`
+      : `YouTube (${actualQuality || (isAudioOnly ? 'Audio' : '360p')})`;
 
     SESSIONS[sessionId] = {
       blob,
@@ -2083,8 +2148,15 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       sessionId,
       sizeMB,
       url: `https://www.youtube.com/watch?v=${videoId}`,
-      label: downloadLabel
+      label: downloadLabel,
+      actualQuality,
+      requestedQuality: quality || '360p',
+      isQualityFallback
     });
+
+    if (autoUpload && apiKey) {
+      await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send);
+    }
   } finally {
     stopKeepAlive();
   }
@@ -2094,12 +2166,16 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
 async function handleChatQuery({ sessionId, videoUrl, fileUri, apiKey, model, retryCount = 5, retryDelayMs = 2200, payload, userQuery }, send) {
   let session = SESSIONS[sessionId];
   if (!session) {
-    if (fileUri) {
-      session = { blob: null, sizeMB: '0', fileUri: fileUri, videoUrl, createdAt: Date.now() };
+    if (fileUri || videoUrl) {
+      session = { blob: null, sizeMB: '0', fileUri: fileUri || videoUrl, videoUrl, sessionId, createdAt: Date.now() };
       SESSIONS[sessionId] = session;
     } else {
       throw new Error('Video session expired. Please analyze the video again before chatting.');
     }
+  }
+  session.sessionId = sessionId;
+  if (videoUrl && (!session.videoUrl || session.videoUrl !== videoUrl)) {
+    session.videoUrl = videoUrl;
   }
 
   const activeFileUri = fileUri || session.fileUri;
@@ -2107,7 +2183,7 @@ async function handleChatQuery({ sessionId, videoUrl, fileUri, apiKey, model, re
     throw new Error('Video file is not available on Google Files API. Please summarize the video first.');
   }
 
-  const containerMime = (session.blob && session.blob.type === 'video/webm') ? 'video/webm' : 'video/mp4';
+  const containerMime = (session?.blob?.type === 'video/webm') ? 'video/webm' : 'video/mp4';
   injectFileUriIntoPayload(payload, activeFileUri, containerMime);
 
   const abortState = createAbortState(sessionId);
@@ -2120,7 +2196,8 @@ async function handleChatQuery({ sessionId, videoUrl, fileUri, apiKey, model, re
     } else if (m.type === 'RESULT') {
       send({ type: 'CHAT_RESULT', json: m.json, model: m.model, query: userQuery });
     } else if (m.type === 'ERROR' || m.type === 'DIAGNOSTIC_ERROR') {
-      send({ type: 'CHAT_ERROR', message: m.message || (m.error && m.error.message) || 'Chat request failed', query: userQuery });
+      const detail = (m.error && (m.error.rawApiMessage || m.error.message)) || m.message || 'Chat request failed';
+      send({ type: 'CHAT_ERROR', message: detail, query: userQuery, error: m.error });
     } else {
       send(m);
     }
@@ -2146,6 +2223,10 @@ function injectFileUriIntoPayload(payload, fileUri, mimeType) {
         if (part.file_data) {
           part.file_data.file_uri = fileUri;
           part.file_data.mime_type = safeMime;
+          found = true;
+        } else if (part.fileData) {
+          part.fileData.fileUri = fileUri;
+          part.fileData.mimeType = safeMime;
           found = true;
         }
       }
@@ -2270,6 +2351,7 @@ async function uploadInChunks(blob, uploadUrl, apiKey, send) {
   const CHUNK_SIZE = 8 * 1024 * 1024;
   let offset = 0;
   const total = blob.size;
+  const totalMB = (total / (1024 * 1024)).toFixed(1);
   let chunkIndex = 0;
   const totalChunks = Math.ceil(total / CHUNK_SIZE);
 
@@ -2278,12 +2360,15 @@ async function uploadInChunks(blob, uploadUrl, apiKey, send) {
     const end = Math.min(offset + CHUNK_SIZE, total);
     const chunk = blob.slice(offset, end);
     const isLast = end === total;
+    const mb = (offset / (1024 * 1024)).toFixed(1);
 
     send({
       type: 'UL_PROGRESS',
       chunk: chunkIndex,
       total: totalChunks,
-      pct: Math.round((offset / total) * 100)
+      pct: Math.round((offset / total) * 100),
+      mb,
+      totalMB
     });
 
     let chunkUploaded = false;
@@ -2417,6 +2502,178 @@ async function pollFileState(fileResourceName, apiKey, send, abortState = null) 
   }
 }
 
+// ── Upload Session Blob to Google Files API ─────────────────────────────────
+async function uploadSessionBlobToGoogleFiles(sessionId, apiKey, send, abortState) {
+  const session = SESSIONS[sessionId];
+  if (!session || !session.blob) {
+    throw new Error('Video buffer unavailable for Google upload.');
+  }
+
+  send({ type: 'PROGRESS', message: `Initializing Google Files API upload (${session.sizeMB}MB)...\nRegistering session with active Gemini API key...` });
+  const uploadUrl = await initResumableUpload(session.blob, apiKey);
+
+  send({ type: 'PROGRESS', message: `Uploading video chunks to Google Gemini (${session.sizeMB}MB)...\nActive API key • Resumable stream upload` });
+  const uploadResult = await uploadInChunks(session.blob, uploadUrl, apiKey, send);
+  const activeFileUri = uploadResult.file.uri;
+  const fileResourceName = uploadResult.file.name;
+  let fileState = uploadResult.file.state;
+  session.fileResourceName = fileResourceName;
+
+  if (fileState !== 'ACTIVE' && fileResourceName) {
+    send({ type: 'PROGRESS', message: `Gemini is processing video frames...\nWaiting for Google frame indexing state: ACTIVE...` });
+    const localAbort = abortState || createAbortState(sessionId);
+    await pollFileState(fileResourceName, apiKey, send, localAbort);
+  }
+
+  session.fileUri = activeFileUri;
+  const keyLast4 = (apiKey && typeof apiKey === 'string') ? apiKey.trim().slice(-4) : '';
+  send({
+    type: 'SESSION_FILE_URI',
+    sessionId,
+    fileUri: activeFileUri,
+    fileResourceName: session.fileResourceName,
+    sizeMB: session.sizeMB,
+    videoUrl: session.videoUrl,
+    label: session.label,
+    apiKeyLast4: keyLast4,
+    apiKeyMasked: keyLast4 ? ('••••' + keyLast4) : ''
+  });
+  return activeFileUri;
+}
+
+async function handleUploadSession({ sessionId, apiKey }, send) {
+  startKeepAlive();
+  try {
+    const session = SESSIONS[sessionId];
+    if (!session || !session.blob) {
+      send({ type: 'SESSION_BLOB_NOT_FOUND', sessionId });
+      return;
+    }
+    if (!apiKey) throw new Error('Missing Gemini API Key for upload');
+    await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send);
+  } catch (err) {
+    send({ type: 'ERROR', message: `Google Files upload failed: ${err.message}` });
+  } finally {
+    stopKeepAlive();
+  }
+}
+
+// ── Network Health Probe ──────────────────────────────────────────────────────
+async function checkNetworkHealth() {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      ok: false,
+      isOffline: true,
+      reason: 'Browser reports device is offline',
+      userMessage: 'Your device is offline. Check your internet connection.'
+    };
+  }
+
+  const startTime = Date.now();
+  // 1. Direct probe to Google API host (generativelanguage.googleapis.com)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+    const res = await fetch('https://generativelanguage.googleapis.com', {
+      method: 'HEAD',
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    const latencyMs = Date.now() - startTime;
+    // Any HTTP response (including 404/403/200) proves DNS, TCP, TLS and Google API edge are reachable!
+    if (res.status > 0) {
+      return {
+        ok: true,
+        target: 'Google Gemini API Edge',
+        status: res.status,
+        latencyMs,
+        reason: 'Connection to Google API edge verified',
+        userMessage: 'Internet connection is verified active and Google API edge is reachable.'
+      };
+    }
+  } catch (probeErr) {
+    // Probe to Google API failed. Check general internet connectivity via Google 204
+    try {
+      const gStart = Date.now();
+      const gRes = await fetch('https://www.google.com/generate_204', {
+        method: 'GET',
+        signal: AbortSignal.timeout(3000)
+      });
+      const gLatency = Date.now() - gStart;
+      if (gRes.status === 204 || gRes.status > 0) {
+        return {
+          ok: false,
+          isBlocked: true,
+          latencyMs: gLatency,
+          reason: 'Google API edge unreachable despite active internet',
+          userMessage: 'Internet is active, but Google Gemini API (generativelanguage.googleapis.com) is currently unreachable. Check VPN, proxy, or firewall settings.'
+        };
+      }
+    } catch (_) {
+      return {
+        ok: false,
+        isOffline: true,
+        reason: 'No internet connection',
+        userMessage: 'No internet connection detected. Check Wi-Fi or network connection.'
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    reason: 'Connection probe timed out',
+    userMessage: 'Network probe timed out. Check your internet connection or proxy.'
+  };
+}
+
+// ── Gemini Server Overload Detection (From GMN Pipeline Pattern) ──────────────
+function isGeminiServerOverloadedText(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  return t.includes('high demand')
+    || t.includes('spikes in demand')
+    || t.includes('overloaded')
+    || t.includes('temporarily unavailable')
+    || t.includes('model is currently experiencing')
+    || t.includes('resource_exhausted');
+}
+
+// ── Network Reconnection Waiter (Preserves Attempt Budget) ────────────────────
+async function waitForNetworkReconnection(send, abortState, maxWaitMs = 180000) {
+  const checkIntervalMs = 3000;
+  const startTime = Date.now();
+
+  send({
+    type: 'PROGRESS',
+    message: '⚠️ Network connection unavailable (failed to fetch). Waiting for internet connection to be restored... (Retry budget paused ⏸️)'
+  });
+
+  while (Date.now() - startTime < maxWaitMs) {
+    if (abortState && abortState.isCancelled) return false;
+
+    await interruptibleSleep(checkIntervalMs, abortState);
+    if (abortState && abortState.isCancelled) return false;
+
+    const health = await checkNetworkHealth();
+    if (health.ok) {
+      send({
+        type: 'PROGRESS',
+        message: '✅ Internet connection restored! Resuming analysis...'
+      });
+      return true;
+    }
+
+    const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+    const maxSec = Math.floor(maxWaitMs / 1000);
+    send({
+      type: 'PROGRESS',
+      message: `⚠️ Network offline. Waiting for internet connection to be restored (${elapsedSec}s / ${maxSec}s)... (Retry budget paused ⏸️)`
+    });
+  }
+
+  return false;
+}
+
 // ── Gemini Generate Content with Auto-Retry & Diagnostics ─────────────────────
 async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDelayMs, send, session, containerMime, abortState = null) {
   const currentModel = normalizeGeminiModelId(model) || 'gemini-2.5-flash';
@@ -2477,8 +2734,7 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
         res = await fetch(endpoint, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': cleanApiKey
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify(payload),
           signal: controller.signal
@@ -2501,15 +2757,19 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
       try { errorJson = JSON.parse(rawText); } catch (_) {}
 
       let rawApiMessage = (errorJson && errorJson.error && errorJson.error.message) ? errorJson.error.message : rawText;
+      const errMessage = rawApiMessage || '';
       let friendlyAdvice = '';
 
       let humanReason = `HTTP ${status}`;
       if (status === 429) {
         humanReason = 'Rate Limit / Quota Exceeded (429)';
         friendlyAdvice = 'You reached your Gemini API rate limit. Please wait a moment before retrying, or check your quota at ai.google.dev.';
-      } else if (status === 503 || rawApiMessage.includes('unreachable') || rawApiMessage.includes('overloaded')) {
+      } else if (status === 503 || rawApiMessage.includes('unreachable') || rawApiMessage.includes('overloaded') || isGeminiServerOverloadedText(rawApiMessage)) {
         humanReason = 'Model Overloaded / High Demand (503)';
         friendlyAdvice = 'Google servers are temporarily experiencing high traffic spikes. Please wait a moment and click "Retry Analysis", or select a Flash model.';
+      } else if (status === 400 && (errMessage.includes('API_KEY_INVALID') || errMessage.includes('API key not valid'))) {
+        humanReason = 'Invalid API Key (400)';
+        friendlyAdvice = 'Your Gemini API Key is invalid. Please check your API key in Settings (⚙️).';
       } else if (status === 400 && (rawApiMessage.includes('10800 images') || rawApiMessage.includes('10800'))) {
         humanReason = 'Video Exceeds 3 Hours (180 Minutes) Limit (400)';
         friendlyAdvice = 'The video duration or selected time range exceeds Google Gemini 3-hour (180 minutes) limit. Please reduce your time range or switch to Mode 2 (Local Download & Upload).';
@@ -2519,9 +2779,12 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
       } else if (status === 400) {
         humanReason = 'Invalid Request / File State (400)';
         friendlyAdvice = 'Google rejected this request format. Try a shorter video segment, or switch to Mode 2 (Local Download & Upload).';
+      } else if (status === 403 && (errMessage.includes('permission to access the File') || errMessage.includes('not have permission') || errMessage.includes('files/'))) {
+        humanReason = 'Video File Scoped to Different API Key or Expired (403)';
+        friendlyAdvice = 'This video file was uploaded under a different API key or has expired (Google Files API files are private and automatically deleted after 48 hours). Please re-analyze the video to refresh the video session.';
       } else if (status === 403) {
-        humanReason = 'Permission Denied / Invalid API Key (403)';
-        friendlyAdvice = 'Your Gemini API Key was rejected by Google. Please check your API key in Settings (⚙️).';
+        humanReason = 'Permission Denied (403)';
+        friendlyAdvice = rawApiMessage || 'Google denied permission for this request (HTTP 403).';
       } else if (status === 404) {
         humanReason = `Model Not Found: "${currentModel}" (404)`;
         friendlyAdvice = `The model "${currentModel}" was not found or is deprecated. Please select a supported model like gemini-2.5-flash or gemini-3.5-flash in Settings.`;
@@ -2533,7 +2796,7 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
       lastError = {
         status,
         humanReason,
-        message: friendlyAdvice || rawApiMessage,
+        message: rawApiMessage || friendlyAdvice,
         friendlyAdvice,
         rawApiMessage,
         rawText,
@@ -2565,32 +2828,59 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
         }
       }
 
-      // If file link expired or is invalid, re-upload to get fresh link and re-send!
-      if (status === 400 && (errMessage.includes('files/') || errMessage.includes('ACTIVE') || errMessage.includes('not found') || errMessage.includes('expired') || errMessage.includes('deleted'))) {
-        send({
-          type: 'PROGRESS',
-          message: 'Google File link expired or not ready. Re-uploading to get fresh Google File link...'
-        });
+      // If file link expired, invalid, or belongs to a different API key (403 Permission Denied on File), re-upload or switch to YouTube Direct and re-send!
+      const isFileAccessError = (status === 400 || status === 403 || status === 404) && (
+        errMessage.includes('files/') ||
+        errMessage.includes('permission to access the File') ||
+        errMessage.includes('not have permission') ||
+        errMessage.includes('ACTIVE') ||
+        errMessage.includes('not found') ||
+        errMessage.includes('expired') ||
+        errMessage.includes('deleted') ||
+        errMessage.includes('may not exist')
+      );
+
+      if (isFileAccessError) {
+        const deadMatch = errMessage.match(/(?:files\/|File\s+)([a-zA-Z0-9_-]+)/i);
+        const deadFileUri = (session && session.fileUri) || (deadMatch ? ('files/' + deadMatch[1]) : null);
+        const currentSessionId = (session && session.sessionId) || 's_' + Date.now();
+
         if (session && session.blob) {
-          session.fileUri = null;
-          session.fileResourceName = null;
           try {
-            const uploadUrl = await initResumableUpload(session.blob, apiKey);
-            const uploadResult = await uploadInChunks(session.blob, uploadUrl, apiKey, send);
-            const freshUri = uploadResult.file.uri;
-            const freshResource = uploadResult.file.name;
-            await pollFileState(freshResource, apiKey, send, abortState);
-            session.fileUri = freshUri;
-            session.fileResourceName = freshResource;
+            const freshUri = await uploadSessionBlobToGoogleFiles(currentSessionId, apiKey, send, abortState);
             injectFileUriIntoPayload(payload, freshUri, containerMime || 'video/mp4');
             continue; // Re-send request immediately with fresh link!
           } catch (reupErr) {
             console.debug('[GVC] Re-upload failed:', reupErr);
           }
+        } else {
+          // In-memory video buffer unavailable: notify user cleanly without switching modes behind their back
+          if (status === 404 && deadFileUri) {
+            send({
+              type: 'STORAGE_FILE_EXPIRED',
+              fileUri: deadFileUri,
+              fileResourceName: deadFileUri
+            });
+          }
+          if (session) {
+            session.fileUri = null;
+            session.fileResourceName = null;
+          }
+          friendlyAdvice = 'Video buffer is no longer in memory. Please click "Fetch Video" or "Analyze Video" to upload the video with your active API key.';
+          humanReason = 'Video Session Buffer Expired';
+          lastError.friendlyAdvice = friendlyAdvice;
+          lastError.humanReason = humanReason;
+          lastError.message = friendlyAdvice;
+          break; // Stop retrying with a dead file
         }
       }
 
-      const isOverloadedOrRetryable = status === 429 || status >= 500 || (status === 400 && errMessage.includes('not in an ACTIVE state')) || errMessage.includes('unreachable') || errMessage.includes('overloaded');
+      const isOverloadedOrRetryable = status === 429
+        || status >= 500
+        || (status === 400 && errMessage.includes('not in an ACTIVE state'))
+        || errMessage.includes('unreachable')
+        || errMessage.includes('overloaded')
+        || isGeminiServerOverloadedText(errMessage);
 
       if (isOverloadedOrRetryable && attempt <= modelMaxRetries) {
         if (abortState && abortState.isCancelled) return;
@@ -2613,31 +2903,91 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
         return;
       }
 
-      let detailMsg = netErr.message;
-      if (netErr.message === 'Failed to fetch') {
-        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-          detailMsg = 'Browser is offline. Check your internet connection.';
-        } else {
-          detailMsg = 'Connection to Google Gemini API failed (Failed to fetch). Check your network, VPN, or proxy. If you are in a region where Google AI is restricted, please enable a VPN or Cloudflare WARP 1.1.1.1.';
+      // Check if error text is actually a server overload / capacity spike
+      const netMsg = (netErr && netErr.message ? netErr.message : String(netErr)).toLowerCase();
+      const isDemandSpike = isGeminiServerOverloadedText(netMsg);
+
+      if (isDemandSpike) {
+        // Google server capacity spike, NOT client network failure!
+        const humanReason = 'Model Overloaded / High Demand (503)';
+        const waitTime = Math.max(200, Number(retryDelayMs) || 2500);
+        lastError = {
+          status: 503,
+          humanReason,
+          message: 'Google servers are temporarily experiencing high traffic spikes. Spikes in demand are usually temporary.',
+          friendlyAdvice: 'Google servers are under heavy traffic spikes. Retrying automatically...',
+          rawText: null,
+          rawApiMessage: netErr.message,
+          errorJson: null
+        };
+
+        if (attempt <= modelMaxRetries) {
+          if (abortState && abortState.isCancelled) return;
+          send({
+            type: 'PROGRESS',
+            message: `⏳ Overloaded / High Demand (503). Retrying with ${currentModel} in ${(waitTime / 1000).toFixed(1)}s • Retry ${attempt}/${modelMaxRetries} (Attempt ${attempt + 1}/${modelMaxRetries + 1})...\nPrevious try failed: ${humanReason}`
+          });
+          await interruptibleSleep(waitTime, abortState);
+          if (abortState && abortState.isCancelled) return;
+          continue;
         }
+        break;
+      }
+
+      // Active pre-flight check to verify connection health
+      const health = await checkNetworkHealth();
+
+      // If device is truly offline or blocked, pause and wait without burning the attempt budget!
+      if (!health.ok && (health.isOffline || health.isBlocked)) {
+        const reconnected = await waitForNetworkReconnection(send, abortState, 180000);
+        if (reconnected && (!abortState || !abortState.isCancelled)) {
+          // Attempt budget preservation: restore attempt counter so zero tries are wasted while offline!
+          attempt--;
+          continue;
+        }
+      }
+
+      let humanReason = 'Network / Connection Interrupted';
+      let detailMsg = '';
+      let friendlyAdvice = '';
+
+      if (health.ok) {
+        // Internet is active and Google edge is reachable -> Google server dropped the socket or timed out!
+        humanReason = 'Google Server Connection Dropped';
+        detailMsg = `Internet connection is verified active (Google API responded in ${health.latencyMs}ms). Google's model server dropped the connection or timed out during processing (Server-Side Disconnect).`;
+        friendlyAdvice = 'Google servers are experiencing high traffic spikes or request processing timed out. Automatic retry will proceed.';
+      } else if (health.isBlocked) {
+        humanReason = 'Google API Unreachable';
+        detailMsg = health.userMessage;
+        friendlyAdvice = 'Ensure traffic to generativelanguage.googleapis.com is allowed in your VPN, proxy, or firewall.';
+      } else if (health.isOffline) {
+        humanReason = 'Internet Disconnected';
+        detailMsg = health.userMessage;
+        friendlyAdvice = 'Please reconnect your device to Wi-Fi or network.';
+      } else {
+        detailMsg = health.userMessage || 'Network connection to Google Gemini API failed or timed out.';
       }
 
       lastError = {
         status: 0,
-        humanReason: 'Network / Connection Interrupted',
+        humanReason,
         message: detailMsg,
-        rawText: `${netErr.stack || String(netErr)}\nEndpoint: ${endpoint.replace(/key=[^&]+/, 'key=REDACTED')}\nModel: ${currentModel}`
+        friendlyAdvice,
+        rawText: null,
+        rawApiMessage: null,
+        isNetworkError: true,
+        networkHealth: health
       };
 
       if (attempt <= modelMaxRetries) {
         if (abortState && abortState.isCancelled) return;
-        let cleanNetMsg = (netErr.message || '').replace(/\s+/g, ' ').trim();
-        if (cleanNetMsg.length > 160) cleanNetMsg = cleanNetMsg.slice(0, 157) + '...';
+
+        const waitTime = Math.max(200, Number(retryDelayMs) || 2500);
         send({
           type: 'PROGRESS',
-          message: `⏳ Connection interrupted (${netErr.message}). Retrying with ${currentModel} in ${(retryDelayMs / 1000).toFixed(1)}s • Retry ${attempt}/${modelMaxRetries} (Attempt ${attempt + 1}/${modelMaxRetries + 1})...\nPrevious try failed: ${lastError.humanReason}${cleanNetMsg ? ` - "${cleanNetMsg}"` : ''}`
+          message: `⏳ Retrying with ${currentModel} in ${(waitTime / 1000).toFixed(1)}s • Retry ${attempt}/${modelMaxRetries}...`
         });
-        await interruptibleSleep(retryDelayMs, abortState);
+        await interruptibleSleep(waitTime, abortState);
         if (abortState && abortState.isCancelled) return;
         continue;
       }

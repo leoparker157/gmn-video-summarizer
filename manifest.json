@@ -5,6 +5,7 @@
   "description": "AI video summarization and captioning for any website and iframe video player using Gemini. Supports all video streams, HLS, MPEG-TS, and HTML5 players up to 2GB.",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "contextMenus",
     "webRequest",
     "declarativeNetRequest",
