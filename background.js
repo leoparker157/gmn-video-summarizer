@@ -172,11 +172,13 @@ function cleanMediaUrl(raw) {
     u.searchParams.delete('bytestart');
     u.searchParams.delete('byteend');
     u.searchParams.delete('range');
+    u.searchParams.delete('rn');
+    u.searchParams.delete('sq');
     u.searchParams.delete('_nc_rid');
     u.searchParams.delete('_nc_req_id');
     return u.toString();
   } catch (_) {
-    return raw.replace(/[?&](?:bytestart|byteend|range|_nc_rid|_nc_req_id)=[^&]*/g, '');
+    return raw.replace(/[?&](?:bytestart|byteend|range|rn|sq|_nc_rid|_nc_req_id)=[^&]*/g, '');
   }
 }
 
@@ -2084,6 +2086,32 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
           if (ytTabs.length > 0 && ytTabs[0]?.id) activeTabId = ytTabs[0].id;
         }
       } catch (_) {}
+    }
+
+    // Immediate sniff check: If the active YouTube tab is already streaming media, download it directly!
+    if (activeTabId && TAB_MEDIA_STREAMS.has(activeTabId)) {
+      const tabStreams = Array.from(TAB_MEDIA_STREAMS.get(activeTabId).values());
+      const gvStreams = tabStreams.filter(s => s && s.url && s.url.includes('googlevideo.com/videoplayback'));
+      if (gvStreams.length > 0) {
+        let bestGv = gvStreams.find(s => s.height === 360 || s.label?.includes('360')) ||
+                     gvStreams.find(s => s.height > 0 && !s.isAudio) ||
+                     gvStreams[0];
+        if (bestGv && bestGv.url) {
+          console.log('[GVC Background] Instantly using playing googlevideo stream from active tab:', bestGv.url.slice(0, 80));
+          return await handleDownloadResolvedYouTubeStream({
+            streamUrl: bestGv.url,
+            totalLength: bestGv.sizeBytes || 0,
+            quality: bestGv.height ? `${bestGv.height}p` : '360p',
+            requestedQuality: quality,
+            isQualityFallback: false,
+            label: label || 'YouTube Video',
+            videoId,
+            videoTitle: label || 'YouTube Video',
+            autoUpload,
+            apiKey
+          }, send, portSessions, tabId);
+        }
+      }
     }
 
     const hybridFetch = async (input, init) => {

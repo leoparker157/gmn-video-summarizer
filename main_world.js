@@ -848,8 +848,37 @@
             }
           }
 
-          // 1b. If in-page formats exist from active authorized session, decipher their signatureCipher directly
-          if (formats.length > 0) {
+          // 1a. If active tab is already playing the video, instantly sniff the stream from performance entries (<1ms latency!)
+          try {
+            const resEntries = (window.performance && typeof window.performance.getEntriesByType === 'function')
+              ? window.performance.getEntriesByType('resource')
+              : [];
+            const gvEntries = (resEntries || []).filter(r => r.name && r.name.includes('googlevideo.com/videoplayback'));
+            if (gvEntries.length > 0) {
+              for (let i = gvEntries.length - 1; i >= 0; i--) {
+                const entryUrl = gvEntries[i].name;
+                try {
+                  const u = new URL(entryUrl);
+                  u.searchParams.delete('range');
+                  u.searchParams.delete('rn');
+                  u.searchParams.delete('sq');
+                  const streamUrl = u.toString();
+                  const itag = parseInt(u.searchParams.get('itag'), 10) || 18;
+                  const isAudio = itag === 140 || itag === 251 || itag === 250 || itag === 249;
+                  formats.unshift({
+                    itag,
+                    url: streamUrl,
+                    quality_label: itag === 18 ? '360p' : (itag === 22 ? '720p' : (itag === 136 ? '720p' : (itag === 137 ? '1080p' : 'Auto'))),
+                    has_video: !isAudio,
+                    has_audio: itag === 18 || itag === 22 || isAudio
+                  });
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+
+          // 1b. If in-page formats exist from active authorized session and lack direct urls, decipher their signatureCipher
+          if (formats.length > 0 && !formats.some(f => f.url)) {
             let player = null;
             if (InnertubeClass) {
               try {
@@ -880,35 +909,6 @@
                 }
               }
             }
-          }
-
-          // 1c. If active tab is already playing the video, sniff the active googlevideo stream from performance entries
-          if (!formats.length || !formats.some(f => f.url)) {
-            try {
-              const resEntries = (window.performance && typeof window.performance.getEntriesByType === 'function')
-                ? window.performance.getEntriesByType('resource')
-                : [];
-              const gvEntries = (resEntries || []).filter(r => r.name && r.name.includes('googlevideo.com/videoplayback'));
-              if (gvEntries.length > 0) {
-                for (let i = gvEntries.length - 1; i >= 0; i--) {
-                  const entryUrl = gvEntries[i].name;
-                  try {
-                    const u = new URL(entryUrl);
-                    u.searchParams.delete('range');
-                    const streamUrl = u.toString();
-                    const itag = parseInt(u.searchParams.get('itag'), 10) || 18;
-                    const isAudio = itag === 140 || itag === 251 || itag === 250 || itag === 249;
-                    formats.push({
-                      itag,
-                      url: streamUrl,
-                      quality_label: itag === 18 ? '360p' : (itag === 22 ? '720p' : 'Auto'),
-                      has_video: !isAudio,
-                      has_audio: itag === 18 || itag === 22 || isAudio
-                    });
-                  } catch (_) {}
-                }
-              }
-            } catch (_) {}
           }
 
           // 2. If in-page formats not available or lack direct urls, resolve via Innertube waterfall with cookies

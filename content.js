@@ -6665,12 +6665,12 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
       mediaType: 'video'
     }, '*');
 
-    // Robust 2.5s fallback to background YouTube.js if main world doesn't answer
+    // Robust 12s fallback to background YouTube.js if main world doesn't answer
     fallbackTimer = setTimeout(() => {
       if (!handled) {
         handled = true;
         window.removeEventListener('message', streamResolvedHandler);
-        console.log('[GVC] Main world stream resolve timed out after 2.5s, falling back to background YouTube.js');
+        console.log('[GVC] Main world stream resolve timed out, falling back to background YouTube.js');
         connectPort();
         port.postMessage({
           type: 'YOUTUBE_JS_DOWNLOAD',
@@ -6682,7 +6682,7 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
           apiKey: apiKey
         });
       }
-    }, 2500);
+    }, 12000);
 
     return;
   }
@@ -7272,7 +7272,7 @@ async function handleMainActionClick() {
                 label: currentYouTubeData.title
               });
             }
-          }, 6000);
+          }, 12000);
           return;
         }
       }
