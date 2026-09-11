@@ -855,7 +855,9 @@
               const activeCookie = passedCookies || document.cookie || undefined;
               const ytDec = await InnertubeClass.create({
                 client_type: 'WEB',
-                cookie: activeCookie
+                cookie: activeCookie,
+                generate_session_locally: true,
+                retrieve_player: true
               });
               const player = ytDec.session?.player;
 
