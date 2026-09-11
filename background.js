@@ -172,13 +172,11 @@ function cleanMediaUrl(raw) {
     u.searchParams.delete('bytestart');
     u.searchParams.delete('byteend');
     u.searchParams.delete('range');
-    u.searchParams.delete('rn');
-    u.searchParams.delete('sq');
     u.searchParams.delete('_nc_rid');
     u.searchParams.delete('_nc_req_id');
     return u.toString();
   } catch (_) {
-    return raw.replace(/[?&](?:bytestart|byteend|range|rn|sq|_nc_rid|_nc_req_id)=[^&]*/g, '');
+    return raw.replace(/[?&](?:bytestart|byteend|range|_nc_rid|_nc_req_id)=[^&]*/g, '');
   }
 }
 
@@ -406,7 +404,6 @@ if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
 
 // ── Context Menu ─────────────────────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
-  ensureYouTubeBypassRules();
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "gvc-summarize-video",
@@ -604,9 +601,6 @@ chrome.runtime.onConnect.addListener((port) => {
         await handleUploadSession(msg, send);
       } else if (msg.type === 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM') {
         await handleDownloadResolvedYouTubeStream(msg, send, portSessions, tabId);
-      } else if (msg.type === 'GET_YT_COOKIES') {
-        const cookies = await getYouTubeAuthCookies();
-        send({ type: 'YT_COOKIES_RESULT', cookies, queryId: msg.queryId });
       } else if (msg.type === 'YOUTUBE_JS_DOWNLOAD') {
         await handleYouTubeDownloadWithYouTubeJS(msg, send, portSessions, tabId);
       } else if (msg.type === 'CHAT_QUERY') {
@@ -648,114 +642,6 @@ chrome.runtime.onConnect.addListener((port) => {
     portSessions.clear();
   });
 });
-
-// Retrieve full authenticated cookies (including HttpOnly: SID, HSID, SSID, LOGIN_INFO, SAPISID)
-async function getYouTubeAuthCookies() {
-  if (!chrome.cookies || !chrome.cookies.getAll) {
-    console.warn('[GVC Cookies] chrome.cookies API not available in worker. Extension reload may be required.');
-    return '';
-  }
-  try {
-    const cookieMap = new Map();
-    const queryUrls = [
-      'https://www.youtube.com/',
-      'https://youtube.com/',
-      'https://m.youtube.com/',
-      'https://accounts.google.com/',
-      'https://myaccount.google.com/'
-    ];
-    const queryDomains = [
-      'youtube.com',
-      '.youtube.com',
-      'google.com',
-      '.google.com'
-    ];
-
-    let storeIds = [null];
-    try {
-      if (chrome.cookies.getAllStores) {
-        const stores = await chrome.cookies.getAllStores();
-        if (stores && stores.length > 0) {
-          storeIds = stores.map(s => s.id);
-        }
-      }
-    } catch (_) {}
-
-    for (const storeId of storeIds) {
-      for (const url of queryUrls) {
-        try {
-          const list = await chrome.cookies.getAll(storeId ? { url, storeId } : { url });
-          for (const c of (list || [])) {
-            if (c && c.name && c.value && !cookieMap.has(c.name)) cookieMap.set(c.name, c.value);
-          }
-        } catch (_) {}
-      }
-      for (const domain of queryDomains) {
-        try {
-          const list = await chrome.cookies.getAll(storeId ? { domain, storeId } : { domain });
-          for (const c of (list || [])) {
-            if (c && c.name && c.value && !cookieMap.has(c.name)) cookieMap.set(c.name, c.value);
-          }
-        } catch (_) {}
-      }
-    }
-
-    const hasAuth = cookieMap.has('SID') || cookieMap.has('LOGIN_INFO') || cookieMap.has('SAPISID');
-    console.log('[GVC Cookies] Retrieved ' + cookieMap.size + ' cookies across stores (Authenticated: ' + hasAuth + ')');
-
-    return Array.from(cookieMap.entries()).map(([k, v]) => k + '=' + v).join('; ');
-  } catch (err) {
-    console.warn('[GVC Cookies] Failed to retrieve cookies:', err);
-    return '';
-  }
-}
-
-// Ensure declarativeNetRequest rule 1005 & 1006 rewrite Origin/Referer/Cookie for YouTube & GoogleVideo requests
-async function ensureYouTubeBypassRules(cookies) {
-  if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
-  try {
-    const requestHeaders = [
-      { header: 'Origin', operation: 'set', value: 'https://www.youtube.com' },
-      { header: 'Referer', operation: 'set', value: 'https://www.youtube.com/' }
-    ];
-    if (cookies && typeof cookies === 'string' && cookies.length > 0) {
-      requestHeaders.push({ header: 'Cookie', operation: 'set', value: cookies });
-    }
-
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [1005, 1006],
-      addRules: [
-        {
-          id: 1005,
-          priority: 2,
-          action: {
-            type: 'modifyHeaders',
-            requestHeaders
-          },
-          condition: {
-            urlFilter: '||youtube.com/',
-            resourceTypes: ['xmlhttprequest', 'other']
-          }
-        },
-        {
-          id: 1006,
-          priority: 2,
-          action: {
-            type: 'modifyHeaders',
-            requestHeaders
-          },
-          condition: {
-            urlFilter: '||googlevideo.com/videoplayback',
-            resourceTypes: ['xmlhttprequest', 'other']
-          }
-        }
-      ]
-    });
-  } catch (err) {
-    console.debug('[GVC DNR] Failed to set YouTube/GoogleVideo bypass rule:', err);
-  }
-}
-ensureYouTubeBypassRules();
 
 async function configureCdnBypassRules(targetUrl, refererUrl) {
   if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
@@ -1961,79 +1847,8 @@ async function handleAnalyzeYouTubeDirect(msg, send) {
   }
 }
 
-// ── Download Stream via Authenticated YouTube Tab ───────────────────────────
-async function downloadStreamViaTab(targetTabId, streamUrl, expectedTotalLength, send) {
-  return new Promise((resolve, reject) => {
-    let timer = setTimeout(() => {
-      chrome.runtime.onMessage.removeListener(onMsg);
-      reject(new Error('Tab stream download timed out after 90 seconds.'));
-    }, 90000);
-
-    const chunks = [];
-    let receivedBytes = 0;
-
-    const onMsg = (msg, sender) => {
-      if (sender.tab?.id !== targetTabId) return;
-      if (msg.type === 'TAB_STREAM_CHUNK') {
-        if (msg.chunk) {
-          const uint8 = msg.chunk instanceof Uint8Array
-            ? msg.chunk
-            : (msg.chunk instanceof ArrayBuffer
-                ? new Uint8Array(msg.chunk)
-                : (msg.chunk.buffer ? new Uint8Array(msg.chunk.buffer) : new Uint8Array(Object.values(msg.chunk))));
-          chunks.push(uint8);
-          receivedBytes += uint8.length;
-          if (msg.total > 0) {
-            const pct = Math.round((receivedBytes / msg.total) * 100);
-            const mb = (receivedBytes / 1024 / 1024).toFixed(1);
-            const totalMB = (msg.total / 1024 / 1024).toFixed(1);
-            send({ type: 'DL_PROGRESS', pct, mb, totalMB });
-          }
-        }
-      } else if (msg.type === 'TAB_STREAM_DONE') {
-        clearTimeout(timer);
-        chrome.runtime.onMessage.removeListener(onMsg);
-        const firstChunk = chunks.length > 0 ? chunks[0] : null;
-        const mimeType = msg.mimeType || (firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : 'video/mp4');
-        const blob = new Blob(chunks, { type: mimeType });
-        resolve(blob);
-      } else if (msg.type === 'TAB_STREAM_ERROR') {
-        clearTimeout(timer);
-        chrome.runtime.onMessage.removeListener(onMsg);
-        reject(new Error(msg.error || 'Tab stream download failed.'));
-      }
-    };
-
-    chrome.runtime.onMessage.addListener(onMsg);
-
-    chrome.tabs.sendMessage(targetTabId, {
-      type: 'START_TAB_STREAM_DOWNLOAD',
-      streamUrl,
-      expectedTotalLength
-    }, { frameId: 0 }, (res) => {
-      if (chrome.runtime.lastError) {
-        clearTimeout(timer);
-        chrome.runtime.onMessage.removeListener(onMsg);
-        reject(new Error(chrome.runtime.lastError.message));
-      }
-    });
-  });
-}
-
 // ── Download Resolved YouTube Stream (From In-Page YouTube.js Engine) ────────
-async function handleDownloadResolvedYouTubeStream({
-  streamUrl,
-  totalLength,
-  quality,
-  requestedQuality,
-  isQualityFallback,
-  label,
-  videoId,
-  videoTitle,
-  autoUpload,
-  apiKey,
-  fromSniffRescue = false
-}, send, portSessions, tabId) {
+async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, quality, requestedQuality, isQualityFallback, label, videoId, videoTitle, autoUpload, apiKey }, send, portSessions, tabId) {
   startKeepAlive();
   try {
     const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
@@ -2042,93 +1857,47 @@ async function handleDownloadResolvedYouTubeStream({
       : `Downloading ${quality || 'video'} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
     send({ type: 'PROGRESS', message: initialMsg });
 
-    // 1. Ensure authenticated cookies and DNR rules are active
-    const ytCookies = await getYouTubeAuthCookies();
-    await ensureYouTubeBypassRules(ytCookies);
-
-    // 2. Sanitize streamUrl (remove duplicate cpn or conflicting parameters)
-    let cleanStreamUrl = streamUrl;
-    try {
-      const u = new URL(streamUrl);
-      const cpns = u.searchParams.getAll('cpn');
-      if (cpns.length > 1) {
-        u.searchParams.delete('cpn');
-        u.searchParams.set('cpn', cpns[0]);
-      }
-      cleanStreamUrl = u.toString();
-    } catch (_) {}
-
     const boundFetch = (input, init) => globalThis.fetch.call(globalThis, input, init);
     const headers = {
       'accept': '*/*',
-      'Range': 'bytes=0-'
+      'origin': 'https://www.youtube.com',
+      'referer': 'https://www.youtube.com'
     };
 
-    let res = null;
-    let swFetchFailed = false;
-    try {
-      res = await boundFetch(cleanStreamUrl, { headers });
-      if (!res.ok && res.status !== 206) {
-        swFetchFailed = true;
-        console.warn(`[GVC Background] SW direct stream fetch returned HTTP ${res.status}`);
-      }
-    } catch (err) {
-      swFetchFailed = true;
-      console.warn(`[GVC Background] SW direct stream fetch threw:`, err.message);
-    }
+    const res = await boundFetch(streamUrl, { headers });
+    if (!res.ok) throw new Error(`YouTube download failed: HTTP ${res.status}`);
 
-    let blob = null;
+    const headerLen = res.headers.get('content-length');
+    const actualTotalLength = totalLength || (headerLen ? parseInt(headerLen, 10) : 0);
+    const actualTotalMB = actualTotalLength > 0 ? (actualTotalLength / (1024 * 1024)).toFixed(1) : totalMB;
 
-    if (!swFetchFailed && res && (res.ok || res.status === 206)) {
-      const headerLen = res.headers.get('content-length');
-      const actualTotalLength = totalLength || (headerLen ? parseInt(headerLen, 10) : 0);
-      const actualTotalMB = actualTotalLength > 0 ? (actualTotalLength / (1024 * 1024)).toFixed(1) : totalMB;
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
 
-      const reader = res.body.getReader();
-      const chunks = [];
-      let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-
-        if (received > MAX_VIDEO_SIZE_BYTES) {
-          throw new Error('Video download exceeded 2 GB limit.');
-        }
-
-        if (actualTotalLength > 0) {
-          const pct = Math.round((received / actualTotalLength) * 100);
-          const mb = (received / 1024 / 1024).toFixed(1);
-          send({ type: 'DL_PROGRESS', pct, mb, totalMB: actualTotalMB });
-        }
+      if (received > MAX_VIDEO_SIZE_BYTES) {
+        throw new Error('Video download exceeded 2 GB limit.');
       }
 
-      const firstChunk = chunks.length > 0 ? chunks[0] : null;
-      const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : 'video/mp4';
-      blob = new Blob(chunks, { type: detectedMime });
-    } else {
-      // SW direct fetch was blocked (e.g. 403) -> delegate download directly to the authenticated YouTube tab!
-      let targetTabId = tabId;
-      if (!targetTabId) {
-        try {
-          const ytTabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
-          if (ytTabs.length > 0 && ytTabs[0]?.id) targetTabId = ytTabs[0].id;
-        } catch (_) {}
-      }
-
-      if (targetTabId) {
-        console.log('[GVC Background] Delegating stream download to authenticated YouTube tab #' + targetTabId);
-        send({ type: 'PROGRESS', message: 'Downloading authenticated stream via YouTube tab...' });
-        blob = await downloadStreamViaTab(targetTabId, cleanStreamUrl, totalLength, send);
-      } else {
-        throw new Error(`Direct stream fetch blocked (${res ? `HTTP ${res.status}` : 'network error'}) and no active YouTube tab found.`);
+      if (actualTotalLength > 0) {
+        const pct = Math.round((received / actualTotalLength) * 100);
+        const mb = (received / 1024 / 1024).toFixed(1);
+        send({ type: 'DL_PROGRESS', pct, mb, totalMB: actualTotalMB });
       }
     }
 
-    if (!blob || blob.size < 150 * 1024) {
-      throw new Error(`Downloaded media stream was truncated (${blob ? (blob.size / 1024).toFixed(1) : 0} KB). Please use Mode 1 (Cloud Direct).`);
+    const firstChunk = chunks.length > 0 ? chunks[0] : null;
+    const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : 'video/mp4';
+    const blob = new Blob(chunks, { type: detectedMime });
+
+    if (blob.size < 150 * 1024) {
+      throw new Error(`Downloaded media stream was truncated (${(blob.size / 1024).toFixed(1)} KB). Please use Mode 1 (Cloud Direct).`);
     }
 
     const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
@@ -2163,17 +1932,16 @@ async function handleDownloadResolvedYouTubeStream({
       await uploadSessionBlobToGoogleFiles(sessionId, apiKey, send);
     }
   } catch (err) {
-    if (videoId && !fromSniffRescue) {
+    if (videoId) {
       console.warn(`[GVC Background] Stream URL direct fetch failed (${err.message}), falling back to YouTube.js engine...`);
-      send({ type: 'PROGRESS', message: 'Resolving via YouTube.js engine...' });
+      send({ type: 'PROGRESS', message: 'Direct stream fetch blocked. Resolving via YouTube.js engine...' });
       return await handleYouTubeDownloadWithYouTubeJS({
         videoId,
         quality: requestedQuality || quality || '360p',
         mediaType: 'video',
         label,
         autoUpload,
-        apiKey,
-        fromResolvedStreamRetry: true
+        apiKey
       }, send, portSessions, tabId);
     }
     throw err;
@@ -2183,11 +1951,10 @@ async function handleDownloadResolvedYouTubeStream({
 }
 
 // ── YouTube.js Local Download Handler (Mode 2 Fallback) ───────────────────────
-async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', mediaType = 'video', label, autoUpload, apiKey, fromResolvedStreamRetry = false }, send, portSessions, tabId) {
+async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', mediaType = 'video', label, autoUpload, apiKey }, send, portSessions, tabId) {
   startKeepAlive();
   try {
-    await ensureYouTubeBypassRules();
-    send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine...' });
+    send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine (Android Client)...' });
 
     if (typeof globalThis.Innertube === 'undefined') {
       throw new Error('YouTube.js engine is not loaded in service worker.');
@@ -2196,41 +1963,9 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     let activeTabId = tabId;
     if (!activeTabId) {
       try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs[0]?.id && (tabs[0].url?.includes('youtube.com') || tabs[0].url?.includes('youtu.be'))) {
-          activeTabId = tabs[0].id;
-        } else {
-          const ytTabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
-          if (ytTabs.length > 0 && ytTabs[0]?.id) activeTabId = ytTabs[0].id;
-        }
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (activeTab) activeTabId = activeTab.id;
       } catch (_) {}
-    }
-
-    // Immediate sniff check: If the active YouTube tab is already streaming media, download it directly!
-    if (!fromResolvedStreamRetry && activeTabId && TAB_MEDIA_STREAMS.has(activeTabId)) {
-      const tabStreams = Array.from(TAB_MEDIA_STREAMS.get(activeTabId).values());
-      const gvStreams = tabStreams.filter(s => s && s.url && s.url.includes('googlevideo.com/videoplayback'));
-      if (gvStreams.length > 0) {
-        let bestGv = gvStreams.find(s => s.height === 360 || s.label?.includes('360')) ||
-                     gvStreams.find(s => s.height > 0 && !s.isAudio) ||
-                     gvStreams[0];
-        if (bestGv && bestGv.url) {
-          console.log('[GVC Background] Instantly using playing googlevideo stream from active tab:', bestGv.url.slice(0, 80));
-          return await handleDownloadResolvedYouTubeStream({
-            streamUrl: bestGv.url,
-            totalLength: bestGv.sizeBytes || 0,
-            quality: bestGv.height ? `${bestGv.height}p` : '360p',
-            requestedQuality: quality,
-            isQualityFallback: false,
-            label: label || 'YouTube Video',
-            videoId,
-            videoTitle: label || 'YouTube Video',
-            autoUpload,
-            apiKey,
-            fromSniffRescue: true
-          }, send, portSessions, tabId);
-        }
-      }
     }
 
     const hybridFetch = async (input, init) => {
@@ -2258,7 +1993,6 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       // to execute with genuine same-origin https://www.youtube.com context, bypassing 403 Forbidden
       if (activeTabId && (url.includes('youtube.com') || url.includes('/youtubei/'))) {
         const tabRes = await new Promise((resolve) => {
-          let timer = setTimeout(() => resolve(null), 6000);
           try {
             chrome.tabs.sendMessage(activeTabId, {
               type: 'TAB_FETCH',
@@ -2266,8 +2000,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
               method,
               headers,
               body: typeof body === 'string' ? body : undefined
-            }, { frameId: 0 }, (res) => {
-              clearTimeout(timer);
+            }, (res) => {
               if (chrome.runtime.lastError || !res || !res.status) {
                 resolve(null);
               } else {
@@ -2275,7 +2008,6 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
               }
             });
           } catch (_) {
-            clearTimeout(timer);
             resolve(null);
           }
         });
@@ -2289,127 +2021,17 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
         }
       }
 
-      // Direct service-worker fetch: set Origin & Referer to ensure YouTube WAF never returns 403
-      if (url.includes('youtube.com') || url.includes('/youtubei/')) {
-        headers['Origin'] = 'https://www.youtube.com';
-        headers['Referer'] = `https://www.youtube.com/watch?v=${videoId}`;
-      }
-      const directInit = Object.assign({}, init, {
-        method,
-        headers,
-        body: (method !== 'GET' && method !== 'HEAD') ? body : undefined
-      });
-      return globalThis.fetch.call(globalThis, url, directInit);
+      // Direct service-worker fetch (for media chunks or standalone fallback)
+      return globalThis.fetch.call(globalThis, input, init);
     };
 
-    const ytCookies = await getYouTubeAuthCookies();
-    await ensureYouTubeBypassRules(ytCookies);
-
-    // Setup global decipher evaluator delegate in case MV3 CSP blocks new Function in service worker
-    globalThis.customJsEvaluatorAsync = async (_data24, _env) => {
-      if (activeTabId) {
-        try {
-          const evalRes = await new Promise((resolve) => {
-            let timer = setTimeout(() => resolve(null), 4000);
-            chrome.tabs.sendMessage(activeTabId, {
-              type: 'TAB_EVAL',
-              code: _data24?.output
-            }, { frameId: 0 }, (res) => {
-              clearTimeout(timer);
-              if (chrome.runtime.lastError || !res || !res.ok) resolve(null);
-              else resolve(res.result);
-            });
-          });
-          if (evalRes) return evalRes;
-        } catch (_) {}
-      }
-      throw new Error('Player decipher evaluator failed');
-    };
-
-    const primaryClient = ytCookies ? 'MWEB' : 'ANDROID';
     const yt = await globalThis.Innertube.create({
-      client_type: primaryClient,
-      cookie: ytCookies || undefined,
+      client_type: 'ANDROID',
       fetch: hybridFetch
     });
+    send({ type: 'PROGRESS', message: 'Extracting direct media formats...' });
 
-    send({ type: 'PROGRESS', message: 'Resolving YouTube media formats across clients...' });
-
-    let info = null;
-    let lastPlayabilityStatus = null;
-    // When cookies are present, prioritize MWEB and WEB because browser cookies authenticate web clients
-    const clientOrder = ytCookies
-      ? ['MWEB', 'WEB', 'ANDROID', 'IOS', 'TV_EMBEDDED']
-      : ['ANDROID', 'IOS', 'MWEB', 'WEB', 'TV_EMBEDDED'];
-
-    for (const clientName of clientOrder) {
-      try {
-        const candInfo = await yt.getBasicInfo(videoId, { client: clientName });
-        const candFormats = (candInfo.streaming_data?.formats || []).concat(candInfo.streaming_data?.adaptive_formats || []);
-        if (candFormats.length > 0) {
-          // Decipher any signatureCipher formats if present
-          for (const f of candFormats) {
-            if (!f.url && (f.signature_cipher || f.cipher)) {
-              try {
-                const u = await f.decipher(yt.session?.player);
-                if (u) f.url = u;
-              } catch (_) {}
-            }
-          }
-          if (candFormats.some(f => f.url)) {
-            info = candInfo;
-            break;
-          }
-          if (!info) info = candInfo;
-        }
-        if (candInfo.playability_status) {
-          lastPlayabilityStatus = candInfo.playability_status;
-        }
-      } catch (err) {
-        console.warn(`[GVC Background] Client ${clientName} failed for ${videoId}:`, err.message);
-      }
-    }
-
-    const tryRescueSniffedStream = async () => {
-      if (fromResolvedStreamRetry) return false;
-      if (activeTabId && TAB_MEDIA_STREAMS.has(activeTabId)) {
-        const tabStreams = Array.from(TAB_MEDIA_STREAMS.get(activeTabId).values());
-        const gvStreams = tabStreams.filter(s => s && s.url && s.url.includes('googlevideo.com/videoplayback'));
-        if (gvStreams.length > 0) {
-          let bestGv = gvStreams.find(s => s.height === 360 || s.label?.includes('360')) ||
-                       gvStreams.find(s => s.height > 0 && !s.isAudio) ||
-                       gvStreams[0];
-          if (bestGv && bestGv.url) {
-            console.log('[GVC Background] Rescuing age-restricted download via tab sniffed googlevideo stream:', bestGv.url.slice(0, 80));
-            await handleDownloadResolvedYouTubeStream({
-              streamUrl: bestGv.url,
-              totalLength: bestGv.sizeBytes || 0,
-              quality: bestGv.height ? `${bestGv.height}p` : '360p',
-              requestedQuality: quality,
-              isQualityFallback: false,
-              label: label || 'YouTube Video',
-              videoId,
-              videoTitle: label || 'YouTube Video',
-              autoUpload,
-              apiKey,
-              fromSniffRescue: true
-            }, send, portSessions, tabId);
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-
-    if (!info || !info.streaming_data) {
-      if (await tryRescueSniffedStream()) return;
-      if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
-        const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
-        throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
-      }
-      throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
-    }
-
+    const info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
     const videoTitle = info.basic_info?.title || label || 'YouTube Video';
     const cpn = info.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
 
@@ -2447,13 +2069,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     }
 
     if (!selectedFormat || !selectedFormat.url) {
-      if (await tryRescueSniffedStream()) return;
-
-      if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
-        const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
-        throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
-      }
-      throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
+      throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct) for instant zero-bandwidth analysis.');
     }
 
     const streamUrl = `${selectedFormat.url}&cpn=${cpn}`;
@@ -2469,59 +2085,45 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip'
     };
 
-    let blob = null;
-    let res = null;
-    try {
-      res = await hybridFetch(streamUrl, { headers });
-    } catch (_) {}
+    const res = await hybridFetch(streamUrl, { headers });
+    if (!res.ok) throw new Error(`YouTube download failed: HTTP ${res.status}`);
 
-    if (!res || !res.ok) {
-      console.warn(`[GVC Background] Background fetch returned ${res ? `HTTP ${res.status}` : 'error'}. Delegating stream download to active YouTube tab...`);
-      const targetTabId = activeTabId || await findActiveYouTubeTabId(videoId);
-      if (targetTabId) {
-        send({ type: 'PROGRESS', message: 'Downloading authenticated stream via YouTube tab...' });
-        blob = await downloadStreamViaTab(targetTabId, streamUrl, formatLen, send);
-      } else {
-        throw new Error(`YouTube download failed: ${res ? `HTTP ${res.status}` : 'no response'}`);
-      }
-    } else {
-      const headerLen = res.headers.get('content-length');
-      const totalLength = formatLen || (headerLen ? parseInt(headerLen, 10) : 0);
-      const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
+    const headerLen = res.headers.get('content-length');
+    const totalLength = formatLen || (headerLen ? parseInt(headerLen, 10) : 0);
+    const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
 
-      const initialMsg = isQualityFallback
-        ? `YouTube direct stream: downloading ${actualQuality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
-        : `Downloading ${actualQuality} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
-      send({ type: 'PROGRESS', message: initialMsg });
+    const initialMsg = isQualityFallback
+      ? `YouTube direct stream: downloading ${actualQuality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
+      : `Downloading ${actualQuality} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
+    send({ type: 'PROGRESS', message: initialMsg });
 
-      const reader = res.body.getReader();
-      const chunks = [];
-      let received = 0;
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
 
-        if (received > MAX_VIDEO_SIZE_BYTES) {
-          throw new Error('Video download exceeded 2 GB limit.');
-        }
-
-        if (totalLength > 0) {
-          const pct = Math.round((received / totalLength) * 100);
-          const mb = (received / 1024 / 1024).toFixed(1);
-          send({ type: 'DL_PROGRESS', pct, mb, totalMB });
-        }
+      if (received > MAX_VIDEO_SIZE_BYTES) {
+        throw new Error('Video download exceeded 2 GB limit.');
       }
 
-      const firstChunk = chunks.length > 0 ? chunks[0] : null;
-      const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : (selectedFormat.mime_type?.split(';')[0] || 'video/mp4');
-      blob = new Blob(chunks, { type: detectedMime });
+      if (totalLength > 0) {
+        const pct = Math.round((received / totalLength) * 100);
+        const mb = (received / 1024 / 1024).toFixed(1);
+        send({ type: 'DL_PROGRESS', pct, mb, totalMB });
+      }
     }
 
-    if (!blob || blob.size < 150 * 1024) {
-      throw new Error(`Downloaded media stream was truncated (${blob ? (blob.size / 1024).toFixed(1) : 0} KB). Please use Mode 1 (Cloud Direct).`);
+    const firstChunk = chunks.length > 0 ? chunks[0] : null;
+    const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : (selectedFormat.mime_type?.split(';')[0] || 'video/mp4');
+    const blob = new Blob(chunks, { type: detectedMime });
+
+    if (blob.size < 150 * 1024) {
+      throw new Error(`Downloaded media stream was truncated (${(blob.size / 1024).toFixed(1)} KB). Please use Mode 1 (Cloud Direct).`);
     }
 
     const sizeMB = (blob.size / 1024 / 1024).toFixed(1);

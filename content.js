@@ -2191,63 +2191,26 @@ function handlePortMessage(msg) {
 
     const display = el('gvc-vid-display');
     if (display) {
-      const isYt = Boolean(currentYouTubeData);
-      const isAgeRestricted = msg.message && (msg.message.includes('Age-Restricted') || msg.message.includes('LOGIN_REQUIRED') || msg.message.includes('sign-in') || msg.message.includes('inappropriate'));
-
-      if (isYt) {
-        display.innerHTML = `
-          <div style="font-size:12px;color:#f4212e;font-weight:700;">
-            ⚠️ ${isAgeRestricted ? 'Age-Restricted / Sign-In Required' : 'YouTube Download Blocked'}
-          </div>
-          <div style="font-size:11px;color:#cfd9de;margin-top:4px;margin-bottom:8px;">
-            ${esc(msg.message)}
-          </div>
-          <button id="gvc-switch-mode1-btn" class="gvc-record-btn" style="width:100%;padding:9px;font-size:12px;font-weight:700;background:#1d9bf0;color:#fff;border-radius:6px;border:none;cursor:pointer;">
-            🚀 Switch to Cloud Direct (Mode 1) & Summarize
-          </button>
-          <button id="gvc-record-fallback-btn" class="gvc-link-btn" style="width:100%;margin-top:6px;padding:7px;font-size:11px;text-align:center;">
-            🎥 Or Record from Screen
-          </button>
-        `;
-        const switchBtn = el('gvc-switch-mode1-btn');
-        if (switchBtn) {
-          switchBtn.onclick = () => {
-            currentYouTubeMode = 1;
-            userPreferredYouTubeMode = 1;
-            store.set({ gvc_yt_preferred_mode: 1 });
-            renderYouTubeView(currentYouTubeData);
-            triggerAnalysis();
-          };
-        }
-        const recBtn = el('gvc-record-fallback-btn');
-        if (recBtn) {
-          recBtn.onclick = () => {
-            const target = lastTargetVideoEl || findActiveVideo();
-            recordVideoStream(target, 30);
-          };
-        }
-      } else {
-        display.innerHTML = `
-          <div style="font-size:12px;color:#f4212e;font-weight:700;">
-            ❌ Download Failed: ${esc(msg.message)}
-          </div>
-          <div style="font-size:11px;color:#71767b;margin-top:4px;margin-bottom:6px;">
-            Direct download was blocked by the CDN. Click below to capture and summarize directly:
-          </div>
-          <button id="gvc-record-fallback-btn" class="gvc-record-btn" style="width:100%;padding:9px;font-size:12px;font-weight:700;background:#1d9bf0;color:#fff;border-radius:6px;border:none;cursor:pointer;">
-            🔴 Capture & Summarize Video from Screen
-          </button>
-          <button id="gvc-retry-fetch-btn" class="gvc-link-btn" style="width:100%;margin-top:8px;padding:8px;font-size:11px;text-align:center;">
-            🔄 Back to Stream Options
-          </button>
-        `;
-        const recBtn = el('gvc-record-fallback-btn');
-        if (recBtn) {
-          recBtn.onclick = () => {
-            const target = lastTargetVideoEl || findActiveVideo();
-            recordVideoStream(target, 30);
-          };
-        }
+      display.innerHTML = `
+        <div style="font-size:12px;color:#f4212e;font-weight:700;">
+          ❌ Download Failed: ${esc(msg.message)}
+        </div>
+        <div style="font-size:11px;color:#71767b;margin-top:4px;margin-bottom:6px;">
+          Direct download was blocked by the CDN. Click below to capture and summarize directly:
+        </div>
+        <button id="gvc-record-fallback-btn" class="gvc-record-btn" style="width:100%;padding:9px;font-size:12px;font-weight:700;background:#1d9bf0;color:#fff;border-radius:6px;border:none;cursor:pointer;">
+          🔴 Capture & Summarize Video from Screen
+        </button>
+        <button id="gvc-retry-fetch-btn" class="gvc-link-btn" style="width:100%;margin-top:8px;padding:8px;font-size:11px;text-align:center;">
+          🔄 Back to Stream Options
+        </button>
+      `;
+      const recBtn = el('gvc-record-fallback-btn');
+      if (recBtn) {
+        recBtn.onclick = () => {
+          const target = lastTargetVideoEl || findActiveVideo();
+          recordVideoStream(target, 30);
+        };
       }
     }
 
@@ -6623,8 +6586,7 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
         handled = true;
 
         if (!event.data.success || !event.data.streamUrl) {
-          const errStr = event.data.error || '';
-          console.warn('[GVC] Stream resolve via main_world failed (' + errStr + '), falling back to background YouTube.js (with full HttpOnly cookies)...');
+          console.warn('[GVC] Stream resolve via main_world failed, falling back to background YouTube.js:', event.data.error);
           connectPort();
           port.postMessage({
             type: 'YOUTUBE_JS_DOWNLOAD',
@@ -6662,16 +6624,15 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
       queryId: qId,
       videoId: currentYouTubeData.videoId,
       quality: '360p',
-      mediaType: 'video',
-      cookies: document.cookie || ''
+      mediaType: 'video'
     }, '*');
 
-    // Robust 12s fallback to background YouTube.js if main world doesn't answer
+    // Robust 2.5s fallback to background YouTube.js if main world doesn't answer
     fallbackTimer = setTimeout(() => {
       if (!handled) {
         handled = true;
         window.removeEventListener('message', streamResolvedHandler);
-        console.log('[GVC] Main world stream resolve timed out, falling back to background YouTube.js');
+        console.log('[GVC] Main world stream resolve timed out after 2.5s, falling back to background YouTube.js');
         connectPort();
         port.postMessage({
           type: 'YOUTUBE_JS_DOWNLOAD',
@@ -6683,7 +6644,7 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
           apiKey: apiKey
         });
       }
-    }, 12000);
+    }, 2500);
 
     return;
   }
@@ -7217,8 +7178,7 @@ async function handleMainActionClick() {
               handled = true;
 
               if (!event.data.success || !event.data.streamUrl) {
-                const errStr = event.data.error || '';
-                console.warn('[GVC] Main world stream resolve failed (' + errStr + '), falling back to background YouTube.js (with full HttpOnly cookies)...');
+                // Main-world stream resolution fallback to background
                 connectPort();
                 port.postMessage({
                   type: 'YOUTUBE_JS_DOWNLOAD',
@@ -7257,8 +7217,7 @@ async function handleMainActionClick() {
             queryId: qId,
             videoId: currentYouTubeData.videoId,
             quality: '360p',
-            mediaType: 'video',
-            cookies: document.cookie || ''
+            mediaType: 'video'
           }, '*');
 
           // Fallback to background resolution if main_world doesn't respond
@@ -7274,7 +7233,7 @@ async function handleMainActionClick() {
                 label: currentYouTubeData.title
               });
             }
-          }, 12000);
+          }, 6000);
           return;
         }
       }
@@ -7868,7 +7827,7 @@ try {
     const cleanHeaders = {};
     for (const [k, v] of Object.entries(headers)) {
       const lower = k.toLowerCase();
-      if (lower === 'origin' || lower === 'referer' || lower === 'user-agent' || lower === 'host' || lower === 'content-length' || lower === 'cookie') {
+      if (lower === 'origin' || lower === 'referer' || lower === 'user-agent' || lower === 'host' || lower === 'content-length') {
         continue;
       }
       cleanHeaders[k] = v;
@@ -7899,93 +7858,6 @@ try {
       .catch((err) => {
         sendResponse({ ok: false, status: 0, statusText: err.message, error: err.message });
       });
-    return true;
-  }
-
-    if (msg.type === 'TAB_EVAL') {
-    try {
-      const fn = new Function(msg.code);
-      const res = fn();
-      sendResponse({ ok: true, result: res });
-    } catch (err) {
-      sendResponse({ ok: false, error: err.message });
-    }
-    return true;
-  }
-
-  if (msg.type === 'START_TAB_STREAM_DOWNLOAD') {
-    if (!isTopFrame) return;
-    const { streamUrl, expectedTotalLength } = msg;
-    (async () => {
-      try {
-        const res = await fetch(streamUrl, {
-          credentials: 'include',
-          headers: {
-            'accept': '*/*',
-            'Range': 'bytes=0-'
-          }
-        });
-        if (!res.ok && res.status !== 206) {
-          throw new Error(`Tab fetch failed: HTTP ${res.status}`);
-        }
-
-        const headerLen = res.headers.get('content-length');
-        const total = expectedTotalLength || (headerLen ? parseInt(headerLen, 10) : 0);
-
-        const reader = res.body.getReader();
-        let buffer = [];
-        let bufferBytes = 0;
-        const FLUSH_THRESHOLD = 1024 * 1024; // 1 MB buffer for fast, low-overhead IPC
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer.push(value);
-          bufferBytes += value.length;
-
-          if (bufferBytes >= FLUSH_THRESHOLD) {
-            const merged = new Uint8Array(bufferBytes);
-            let offset = 0;
-            for (const b of buffer) {
-              merged.set(b, offset);
-              offset += b.length;
-            }
-            chrome.runtime.sendMessage({
-              type: 'TAB_STREAM_CHUNK',
-              chunk: merged.buffer,
-              total
-            }).catch(() => {});
-            buffer = [];
-            bufferBytes = 0;
-          }
-        }
-
-        if (bufferBytes > 0) {
-          const merged = new Uint8Array(bufferBytes);
-          let offset = 0;
-          for (const b of buffer) {
-            merged.set(b, offset);
-            offset += b.length;
-          }
-          chrome.runtime.sendMessage({
-            type: 'TAB_STREAM_CHUNK',
-            chunk: merged.buffer,
-            total
-          }).catch(() => {});
-        }
-
-        chrome.runtime.sendMessage({
-          type: 'TAB_STREAM_DONE',
-          mimeType: res.headers.get('content-type') || 'video/mp4'
-        }).catch(() => {});
-      } catch (err) {
-        chrome.runtime.sendMessage({
-          type: 'TAB_STREAM_ERROR',
-          error: err.message
-        }).catch(() => {});
-      }
-    })();
-    sendResponse({ started: true });
     return true;
   }
 

@@ -32135,17 +32135,7 @@ return process("${n || ""}", "${sp || ""}", "${s || ""}");`;
 
   // ../../.gemini/antigravity-ide/brain/3fbc35a9-cb64-4749-8d18-cc467a354ca8/scratch/node_modules/youtubei.js/dist/src/platform/jsruntime/default.js
   function evaluate(_data24, _env) {
-    if (typeof globalThis.customJsEvaluator === "function") {
-      return globalThis.customJsEvaluator(_data24, _env);
-    }
-    try {
-      return (new Function(_data24.output))();
-    } catch (e) {
-      if (typeof globalThis.customJsEvaluatorAsync === "function") {
-        return globalThis.customJsEvaluatorAsync(_data24, _env);
-      }
-      throw e;
-    }
+    throw new Error("To decipher URLs, you must provide your own JavaScript evaluator. See https://ytjs.dev/guide/getting-started.html#providing-a-custom-javascript-interpreter for more details.");
   }
 
   // ../../.gemini/antigravity-ide/brain/3fbc35a9-cb64-4749-8d18-cc467a354ca8/scratch/node_modules/youtubei.js/dist/src/core/Actions.js
