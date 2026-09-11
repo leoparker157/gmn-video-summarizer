@@ -1976,7 +1976,11 @@ async function downloadStreamViaTab(targetTabId, streamUrl, expectedTotalLength,
       if (sender.tab?.id !== targetTabId) return;
       if (msg.type === 'TAB_STREAM_CHUNK') {
         if (msg.chunk) {
-          const uint8 = new Uint8Array(msg.chunk);
+          const uint8 = msg.chunk instanceof Uint8Array
+            ? msg.chunk
+            : (msg.chunk instanceof ArrayBuffer
+                ? new Uint8Array(msg.chunk)
+                : (msg.chunk.buffer ? new Uint8Array(msg.chunk.buffer) : new Uint8Array(Object.values(msg.chunk))));
           chunks.push(uint8);
           receivedBytes += uint8.length;
           if (msg.total > 0) {
@@ -2006,7 +2010,7 @@ async function downloadStreamViaTab(targetTabId, streamUrl, expectedTotalLength,
       type: 'START_TAB_STREAM_DOWNLOAD',
       streamUrl,
       expectedTotalLength
-    }, (res) => {
+    }, { frameId: 0 }, (res) => {
       if (chrome.runtime.lastError) {
         clearTimeout(timer);
         chrome.runtime.onMessage.removeListener(onMsg);

@@ -7914,6 +7914,7 @@ try {
   }
 
   if (msg.type === 'START_TAB_STREAM_DOWNLOAD') {
+    if (!isTopFrame) return;
     const { streamUrl, expectedTotalLength } = msg;
     (async () => {
       try {
