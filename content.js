@@ -7412,6 +7412,12 @@ function updateBadgeStatus(badge, video) {
   const src = video.currentSrc || video.src || '';
   const isDirect = src && !src.startsWith('blob:') && (src.includes('.mp4') || src.includes('.webm'));
 
+  const isYouTube = window.location.hostname.includes('youtube.com') ||
+                    window.location.hostname.includes('youtu.be') ||
+                    (typeof currentYouTubeData !== 'undefined' && Boolean(currentYouTubeData?.canonicalUrl)) ||
+                    Boolean(video.closest && video.closest('#movie_player, ytd-player, .html5-video-player')) ||
+                    Boolean(src && (src.includes('youtube.com') || src.includes('youtu.be')));
+
   let resStr = '';
   if (w && h) {
     const minDim = Math.min(w, h);
@@ -7422,7 +7428,10 @@ function updateBadgeStatus(badge, video) {
   const dotEl   = badge.querySelector('.gvc-badge-dot');
 
   if (labelEl) {
-    if (resStr) {
+    // For YouTube, always show 'Summarize' cleanly without resolution labels (e.g. 480p, 360p)
+    if (isYouTube) {
+      labelEl.innerText = 'Summarize';
+    } else if (resStr) {
       labelEl.innerText = `Summarize (${resStr})`;
     } else {
       labelEl.innerText = 'Summarize Video';
@@ -7431,7 +7440,10 @@ function updateBadgeStatus(badge, video) {
 
   if (dotEl) {
     const mainEl = badge.querySelector('.gvc-badge-main') || badge;
-    if (isDirect || resStr) {
+    if (isYouTube) {
+      dotEl.className = 'gvc-badge-dot gvc-dot-ready';
+      mainEl.title = '⚡ Ready: YouTube Stream — Click to summarize with Gemini';
+    } else if (isDirect || resStr) {
       dotEl.className = 'gvc-badge-dot gvc-dot-ready';
       mainEl.title = `⚡ Ready: ${resStr ? resStr : 'Stream Detected'} — Click to summarize this video specifically`;
     } else {
@@ -7545,13 +7557,14 @@ function attachBadgeToVideo(video) {
     badge.style.right = '12px';
     badge.style.zIndex = '2147483647';
   }
+  const isYtInitial = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
   badge.innerHTML = `
     <div class="gvc-badge-main" title="Click to summarize this video specifically with GMN Universal Video Summarizer">
-      <span class="gvc-badge-dot gvc-dot-detect"></span>
+      <span class="gvc-badge-dot ${isYtInitial ? 'gvc-dot-ready' : 'gvc-dot-detect'}"></span>
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;">
         <polygon points="5 3 19 12 5 21 5 3"></polygon>
       </svg>
-      <span class="gvc-badge-text">Summarize Video</span>
+      <span class="gvc-badge-text">${isYtInitial ? 'Summarize' : 'Summarize Video'}</span>
     </div>
     <span class="gvc-badge-close" title="Hide on this video" aria-label="Close">✕</span>
   `;
