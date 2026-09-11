@@ -162,16 +162,20 @@
       return origOpen.apply(this, args);
     };
     XMLHttpRequest.prototype.send = function(...args) {
-      if (isTwitter) {
-        this.addEventListener('load', function() {
-          try {
-            if (this._gvcUrl && (this._gvcUrl.includes('/graphql/') || this._gvcUrl.includes('/i/api/'))) {
-              const json = JSON.parse(this.responseText);
-              harvestVideos(json);
+      this.addEventListener('load', function() {
+        try {
+          if (this._gvcUrl && this._gvcUrl.includes('/youtubei/v1/player')) {
+            const json = JSON.parse(this.responseText);
+            if (json && json.streamingData) {
+              window.__GVC_LAST_PLAYER_RESPONSE__ = json;
+              window.__GVC_LAST_PLAYER_RESPONSE_TIME__ = Date.now();
             }
-          } catch (_) {}
-        });
-      }
+          } else if (isTwitter && this._gvcUrl && (this._gvcUrl.includes('/graphql/') || this._gvcUrl.includes('/i/api/'))) {
+            const json = JSON.parse(this.responseText);
+            harvestVideos(json);
+          }
+        } catch (_) {}
+      });
       return origSend.apply(this, args);
     };
   } catch (_) {}
@@ -837,15 +841,21 @@
             if (!allFormats.length) return null;
 
             let fmt = null;
-            // Check for formats with direct URL (preferred) or signatureCipher (needs decoding)
-            const hasUrl = (f) => !!(f.url || f.signatureCipher);
+            const hasUrl = (f) => !!(f.url || f.signatureCipher || f.cipher);
             if (!isAudioOnly) {
-              // Try requested quality first
-              if (quality === '1080p') fmt = allFormats.find(f => hasUrl(f) && f.qualityLabel && f.qualityLabel.includes('1080'));
-              else if (quality === '720p') fmt = allFormats.find(f => hasUrl(f) && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
-              else if (quality === '480p') fmt = allFormats.find(f => hasUrl(f) && f.qualityLabel && f.qualityLabel.includes('480'));
-              else if (quality === '360p') fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
-              // Fallback hierarchy
+              // Prefer combined audio+video formats from streamingData.formats first
+              const combinedFormats = pr.streamingData.formats || [];
+              if (quality === '720p') fmt = combinedFormats.find(f => hasUrl(f) && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
+              if (!fmt && quality === '360p') fmt = combinedFormats.find(f => hasUrl(f) && f.itag === 18);
+
+              // Next try from all formats matching requested quality
+              if (!fmt) {
+                if (quality === '1080p') fmt = allFormats.find(f => hasUrl(f) && f.qualityLabel && f.qualityLabel.includes('1080'));
+                else if (quality === '720p') fmt = allFormats.find(f => hasUrl(f) && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
+                else if (quality === '480p') fmt = allFormats.find(f => hasUrl(f) && f.qualityLabel && f.qualityLabel.includes('480'));
+                else if (quality === '360p') fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
+              }
+              // Fallback hierarchy: itag 18 (360p) or itag 22 (720p)
               if (!fmt) fmt = allFormats.find(f => hasUrl(f) && (f.itag === 22 || (f.qualityLabel && f.qualityLabel.includes('720'))));
               if (!fmt) fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
               if (!fmt) fmt = allFormats.find(f => hasUrl(f) && f.mimeType && f.mimeType.startsWith('video/'));
@@ -853,14 +863,8 @@
               fmt = allFormats.find(f => hasUrl(f) && f.mimeType && f.mimeType.startsWith('audio/'));
               if (!fmt) fmt = allFormats.find(f => hasUrl(f) && f.itag === 18);
             }
-            if (fmt && (fmt.url || fmt.signatureCipher)) {
-              // If format only has signatureCipher (no plain url), we can't use it directly
-              // from the page player — need Innertube to decode it
-              if (!fmt.url && fmt.signatureCipher) {
-                console.log('[GVC] Page player format has signatureCipher only (itag=' + fmt.itag + '), need Innertube to decode');
-                return null;
-              }
-              console.log('[GVC] Found stream from page player (' + source + '): itag=' + fmt.itag + ' quality=' + (fmt.qualityLabel || 'N/A'));
+            if (fmt && (fmt.url || fmt.signatureCipher || fmt.cipher)) {
+              console.log('[GVC] Found stream candidate from page player (' + source + '): itag=' + fmt.itag + ' quality=' + (fmt.qualityLabel || 'N/A') + ' hasUrl=' + !!fmt.url + ' hasCipher=' + !!(fmt.signatureCipher || fmt.cipher));
               return fmt;
             }
             return null;
@@ -884,10 +888,10 @@
             }
           }
 
-          // Source 3: Intercepted v1/player response (cached by our fetch hook)
+          // Source 3: Intercepted v1/player response (cached by fetch/XHR hook)
           if (!playerFormat && window.__GVC_LAST_PLAYER_RESPONSE__) {
             const age = Date.now() - (window.__GVC_LAST_PLAYER_RESPONSE_TIME__ || 0);
-            if (age < 300000) { // Only use if less than 5 minutes old
+            if (age < 300000) {
               playerFormat = tryExtractFromPlayerResponse(window.__GVC_LAST_PLAYER_RESPONSE__, 'intercepted v1/player');
               if (window.__GVC_LAST_PLAYER_RESPONSE__.videoDetails && window.__GVC_LAST_PLAYER_RESPONSE__.videoDetails.title) {
                 playerTitle = window.__GVC_LAST_PLAYER_RESPONSE__.videoDetails.title;
@@ -895,28 +899,79 @@
             }
           }
 
-          if (playerFormat && playerFormat.url) {
-            // Success! Use the player's own authenticated stream URL
-            const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-            const streamUrl = playerFormat.url + (playerFormat.url.includes('?') ? '&' : '?') + 'cpn=' + cpn;
-            const totalLength = parseInt(playerFormat.contentLength, 10) || 0;
-            const actualQuality = playerFormat.qualityLabel || (playerFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
-            const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
+          // If still no format, wait up to 1.5s in case player/interceptor is in flight
+          if (!playerFormat) {
+            for (let attempt = 0; attempt < 5; attempt++) {
+              await new Promise(r => setTimeout(r, 300));
+              const mp = document.getElementById('movie_player');
+              if (mp && typeof mp.getPlayerResponse === 'function') {
+                const pr = mp.getPlayerResponse();
+                playerFormat = tryExtractFromPlayerResponse(pr, 'movie_player (retry)');
+                if (playerFormat) {
+                  if (pr && pr.videoDetails && pr.videoDetails.title) playerTitle = pr.videoDetails.title;
+                  break;
+                }
+              }
+              if (window.__GVC_LAST_PLAYER_RESPONSE__) {
+                playerFormat = tryExtractFromPlayerResponse(window.__GVC_LAST_PLAYER_RESPONSE__, 'intercepted v1/player (retry)');
+                if (playerFormat) break;
+              }
+            }
+          }
 
-            window.postMessage({
-              type: 'GVC_RESOLVE_YOUTUBE_STREAM_RES',
-              queryId,
-              success: true,
-              streamUrl,
-              totalLength,
-              actualQuality,
-              requestedQuality: quality,
-              isQualityFallback,
-              videoTitle: playerTitle,
-              itag: playerFormat.itag,
-              source: 'page_player'
-            }, '*');
-            return;
+          if (playerFormat) {
+            let streamUrl = playerFormat.url;
+            const cipherStr = playerFormat.signatureCipher || playerFormat.cipher;
+
+            // Decipher signatureCipher if direct url is not provided
+            if (!streamUrl && cipherStr) {
+              console.log('[GVC] Format has signatureCipher, deciphering with Innertube Player engine...');
+              try {
+                let InnertubeClass = window.Innertube || globalThis.Innertube;
+                if (!InnertubeClass) {
+                  for (let i = 0; i < 30; i++) {
+                    await new Promise(r => setTimeout(r, 100));
+                    InnertubeClass = window.Innertube || globalThis.Innertube;
+                    if (InnertubeClass) break;
+                  }
+                }
+                if (InnertubeClass) {
+                  if (!window.__GVC_INNERTUBE_SESSION__) {
+                    window.__GVC_INNERTUBE_SESSION__ = await InnertubeClass.create();
+                  }
+                  const player = window.__GVC_INNERTUBE_SESSION__?.session?.player;
+                  if (player && typeof player.decipher === 'function') {
+                    streamUrl = await player.decipher(null, cipherStr);
+                    console.log('[GVC] Successfully deciphered stream URL from signatureCipher!');
+                  }
+                }
+              } catch (decErr) {
+                console.warn('[GVC] Failed to decipher signatureCipher:', decErr);
+              }
+            }
+
+            if (streamUrl) {
+              const cpn = Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+              const fullStreamUrl = streamUrl + (streamUrl.includes('?') ? '&' : '?') + 'cpn=' + cpn;
+              const totalLength = parseInt(playerFormat.contentLength, 10) || 0;
+              const actualQuality = playerFormat.qualityLabel || (playerFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
+              const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
+
+              window.postMessage({
+                type: 'GVC_RESOLVE_YOUTUBE_STREAM_RES',
+                queryId,
+                success: true,
+                streamUrl: fullStreamUrl,
+                totalLength,
+                actualQuality,
+                requestedQuality: quality,
+                isQualityFallback,
+                videoTitle: playerTitle,
+                itag: playerFormat.itag,
+                source: 'page_player'
+              }, '*');
+              return;
+            }
           }
 
           // ── Fallback: Innertube with WEB client (uses page cookies for auth) ──
@@ -932,39 +987,44 @@
           if (!InnertubeClass) {
             throw new Error('YouTube.js engine not loaded in page');
           }
-          // Use WEB client so the page's cookies (signed-in session) are recognized
-          // ANDROID client ignores browser cookies and acts as anonymous
-          const yt = await InnertubeClass.create();
+          const yt = window.__GVC_INNERTUBE_SESSION__ || (window.__GVC_INNERTUBE_SESSION__ = await InnertubeClass.create());
           const info = await yt.getBasicInfo(videoId);
           const formats = (info.streaming_data?.formats || []).concat(info.streaming_data?.adaptive_formats || []);
 
           let selectedFormat = null;
+          const hasAny = (f) => !!(f.url || f.signature_cipher || f.cipher);
 
           if (!isAudioOnly) {
             if (quality === '1080p') {
-              selectedFormat = formats.find(f => f.quality_label?.includes('1080') && f.url);
+              selectedFormat = formats.find(f => f.quality_label?.includes('1080') && hasAny(f));
             } else if (quality === '720p') {
-              selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && f.url);
+              selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && hasAny(f));
             } else if (quality === '480p') {
-              selectedFormat = formats.find(f => f.quality_label?.includes('480') && f.url);
+              selectedFormat = formats.find(f => f.quality_label?.includes('480') && hasAny(f));
             } else if (quality === '360p') {
-              selectedFormat = formats.find(f => f.itag === 18 && f.url);
+              selectedFormat = formats.find(f => f.itag === 18 && hasAny(f));
             }
 
             // Fallback hierarchy if requested resolution lacks a direct combined stream
             if (!selectedFormat) {
               if (quality === '720p' || quality === '480p' || quality === '1080p') {
-                selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && f.url);
+                selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && hasAny(f));
               }
               if (!selectedFormat) {
-                selectedFormat = formats.find(f => f.itag === 18 && f.url) ||
-                                 formats.find(f => (f.itag === 18 || f.itag === 22) && f.url) ||
-                                 formats.find(f => f.has_video && f.url);
+                selectedFormat = formats.find(f => f.itag === 18 && hasAny(f)) ||
+                                 formats.find(f => (f.itag === 18 || f.itag === 22) && hasAny(f)) ||
+                                 formats.find(f => f.has_video && hasAny(f));
               }
             }
           } else {
-            selectedFormat = formats.find(f => f.has_audio && !f.has_video && f.url) ||
-                             formats.find(f => f.itag === 18 && f.url);
+            selectedFormat = formats.find(f => f.has_audio && !f.has_video && hasAny(f)) ||
+                             formats.find(f => f.itag === 18 && hasAny(f));
+          }
+
+          if (selectedFormat && !selectedFormat.url && (selectedFormat.signature_cipher || selectedFormat.cipher)) {
+            try {
+              selectedFormat.url = await selectedFormat.decipher(yt.session.player);
+            } catch (_) {}
           }
 
           if (!selectedFormat || !selectedFormat.url) {

@@ -2077,32 +2077,40 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     const isAudioOnly = mediaType === 'audio';
     let selectedFormat = null;
 
+    const hasAny = (f) => !!(f.url || f.signature_cipher || f.cipher);
+
     if (!isAudioOnly) {
       if (quality === '1080p') {
-        selectedFormat = formats.find(f => f.quality_label?.includes('1080') && f.url);
+        selectedFormat = formats.find(f => f.quality_label?.includes('1080') && hasAny(f));
       } else if (quality === '720p') {
-        selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && f.url);
+        selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && hasAny(f));
       } else if (quality === '480p') {
-        selectedFormat = formats.find(f => f.quality_label?.includes('480') && f.url);
+        selectedFormat = formats.find(f => f.quality_label?.includes('480') && hasAny(f));
       } else if (quality === '360p') {
-        selectedFormat = formats.find(f => f.itag === 18 && f.url);
+        selectedFormat = formats.find(f => f.itag === 18 && hasAny(f));
       }
 
       // Fallback hierarchy if requested resolution lacks direct combined stream
       if (!selectedFormat) {
         if (quality === '720p' || quality === '480p' || quality === '1080p') {
-          selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && f.url);
+          selectedFormat = formats.find(f => (f.itag === 22 || f.quality_label?.includes('720')) && hasAny(f));
         }
         if (!selectedFormat) {
-          selectedFormat = formats.find(f => f.itag === 18 && f.url) ||
-                           formats.find(f => (f.itag === 18 || f.itag === 22) && f.url) ||
-                           formats.find(f => f.has_video && f.url);
+          selectedFormat = formats.find(f => f.itag === 18 && hasAny(f)) ||
+                           formats.find(f => (f.itag === 18 || f.itag === 22) && hasAny(f)) ||
+                           formats.find(f => f.has_video && hasAny(f));
         }
       }
     } else {
       // Audio stream or fallback to itag 18 (which contains full audio track)
-      selectedFormat = formats.find(f => f.has_audio && !f.has_video && f.url) ||
-                       formats.find(f => f.itag === 18 && f.url);
+      selectedFormat = formats.find(f => f.has_audio && !f.has_video && hasAny(f)) ||
+                       formats.find(f => f.itag === 18 && hasAny(f));
+    }
+
+    if (selectedFormat && !selectedFormat.url && (selectedFormat.signature_cipher || selectedFormat.cipher)) {
+      try {
+        selectedFormat.url = await selectedFormat.decipher(yt.session.player);
+      } catch (_) {}
     }
 
     if (!selectedFormat || !selectedFormat.url) {
