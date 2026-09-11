@@ -2469,45 +2469,59 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip'
     };
 
-    const res = await hybridFetch(streamUrl, { headers });
-    if (!res.ok) throw new Error(`YouTube download failed: HTTP ${res.status}`);
+    let blob = null;
+    let res = null;
+    try {
+      res = await hybridFetch(streamUrl, { headers });
+    } catch (_) {}
 
-    const headerLen = res.headers.get('content-length');
-    const totalLength = formatLen || (headerLen ? parseInt(headerLen, 10) : 0);
-    const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
+    if (!res || !res.ok) {
+      console.warn(`[GVC Background] Background fetch returned ${res ? `HTTP ${res.status}` : 'error'}. Delegating stream download to active YouTube tab...`);
+      const targetTabId = activeTabId || await findActiveYouTubeTabId(videoId);
+      if (targetTabId) {
+        send({ type: 'PROGRESS', message: 'Downloading authenticated stream via YouTube tab...' });
+        blob = await downloadStreamViaTab(targetTabId, streamUrl, formatLen, send);
+      } else {
+        throw new Error(`YouTube download failed: ${res ? `HTTP ${res.status}` : 'no response'}`);
+      }
+    } else {
+      const headerLen = res.headers.get('content-length');
+      const totalLength = formatLen || (headerLen ? parseInt(headerLen, 10) : 0);
+      const totalMB = totalLength > 0 ? (totalLength / (1024 * 1024)).toFixed(1) : null;
 
-    const initialMsg = isQualityFallback
-      ? `YouTube direct stream: downloading ${actualQuality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
-      : `Downloading ${actualQuality} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
-    send({ type: 'PROGRESS', message: initialMsg });
+      const initialMsg = isQualityFallback
+        ? `YouTube direct stream: downloading ${actualQuality || '360p'} AI-optimal combined stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`
+        : `Downloading ${actualQuality} (${totalMB ? `${totalMB} MB` : 'stream'}) via YouTube.js...`;
+      send({ type: 'PROGRESS', message: initialMsg });
 
-    const reader = res.body.getReader();
-    const chunks = [];
-    let received = 0;
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
 
-      if (received > MAX_VIDEO_SIZE_BYTES) {
-        throw new Error('Video download exceeded 2 GB limit.');
+        if (received > MAX_VIDEO_SIZE_BYTES) {
+          throw new Error('Video download exceeded 2 GB limit.');
+        }
+
+        if (totalLength > 0) {
+          const pct = Math.round((received / totalLength) * 100);
+          const mb = (received / 1024 / 1024).toFixed(1);
+          send({ type: 'DL_PROGRESS', pct, mb, totalMB });
+        }
       }
 
-      if (totalLength > 0) {
-        const pct = Math.round((received / totalLength) * 100);
-        const mb = (received / 1024 / 1024).toFixed(1);
-        send({ type: 'DL_PROGRESS', pct, mb, totalMB });
-      }
+      const firstChunk = chunks.length > 0 ? chunks[0] : null;
+      const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : (selectedFormat.mime_type?.split(';')[0] || 'video/mp4');
+      blob = new Blob(chunks, { type: detectedMime });
     }
 
-    const firstChunk = chunks.length > 0 ? chunks[0] : null;
-    const detectedMime = firstChunk ? detectVideoMimeType(firstChunk.buffer || firstChunk) : (selectedFormat.mime_type?.split(';')[0] || 'video/mp4');
-    const blob = new Blob(chunks, { type: detectedMime });
-
-    if (blob.size < 150 * 1024) {
-      throw new Error(`Downloaded media stream was truncated (${(blob.size / 1024).toFixed(1)} KB). Please use Mode 1 (Cloud Direct).`);
+    if (!blob || blob.size < 150 * 1024) {
+      throw new Error(`Downloaded media stream was truncated (${blob ? (blob.size / 1024).toFixed(1) : 0} KB). Please use Mode 1 (Cloud Direct).`);
     }
 
     const sizeMB = (blob.size / 1024 / 1024).toFixed(1);

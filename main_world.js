@@ -922,7 +922,9 @@
             const primaryClient = activeCookie ? 'MWEB' : 'ANDROID';
             const yt = await InnertubeClass.create({
               client_type: primaryClient,
-              cookie: activeCookie
+              cookie: activeCookie,
+              generate_session_locally: true,
+              retrieve_player: true
             });
 
             const clientList = activeCookie
