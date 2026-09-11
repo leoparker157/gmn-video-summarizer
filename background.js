@@ -404,6 +404,7 @@ if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
 
 // ── Context Menu ─────────────────────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
+  ensureYouTubeBypassRules();
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "gvc-summarize-video",
@@ -601,6 +602,9 @@ chrome.runtime.onConnect.addListener((port) => {
         await handleUploadSession(msg, send);
       } else if (msg.type === 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM') {
         await handleDownloadResolvedYouTubeStream(msg, send, portSessions, tabId);
+      } else if (msg.type === 'GET_YT_COOKIES') {
+        const cookies = await getYouTubeAuthCookies();
+        send({ type: 'YT_COOKIES_RESULT', cookies, queryId: msg.queryId });
       } else if (msg.type === 'YOUTUBE_JS_DOWNLOAD') {
         await handleYouTubeDownloadWithYouTubeJS(msg, send, portSessions, tabId);
       } else if (msg.type === 'CHAT_QUERY') {
@@ -642,6 +646,114 @@ chrome.runtime.onConnect.addListener((port) => {
     portSessions.clear();
   });
 });
+
+// Retrieve full authenticated cookies (including HttpOnly: SID, HSID, SSID, LOGIN_INFO, SAPISID)
+async function getYouTubeAuthCookies() {
+  if (!chrome.cookies || !chrome.cookies.getAll) {
+    console.warn('[GVC Cookies] chrome.cookies API not available in worker. Extension reload may be required.');
+    return '';
+  }
+  try {
+    const cookieMap = new Map();
+    const queryUrls = [
+      'https://www.youtube.com/',
+      'https://youtube.com/',
+      'https://m.youtube.com/',
+      'https://accounts.google.com/',
+      'https://myaccount.google.com/'
+    ];
+    const queryDomains = [
+      'youtube.com',
+      '.youtube.com',
+      'google.com',
+      '.google.com'
+    ];
+
+    let storeIds = [null];
+    try {
+      if (chrome.cookies.getAllStores) {
+        const stores = await chrome.cookies.getAllStores();
+        if (stores && stores.length > 0) {
+          storeIds = stores.map(s => s.id);
+        }
+      }
+    } catch (_) {}
+
+    for (const storeId of storeIds) {
+      for (const url of queryUrls) {
+        try {
+          const list = await chrome.cookies.getAll(storeId ? { url, storeId } : { url });
+          for (const c of (list || [])) {
+            if (c && c.name && c.value) cookieMap.set(c.name, c.value);
+          }
+        } catch (_) {}
+      }
+      for (const domain of queryDomains) {
+        try {
+          const list = await chrome.cookies.getAll(storeId ? { domain, storeId } : { domain });
+          for (const c of (list || [])) {
+            if (c && c.name && c.value && !cookieMap.has(c.name)) cookieMap.set(c.name, c.value);
+          }
+        } catch (_) {}
+      }
+    }
+
+    const hasAuth = cookieMap.has('SID') || cookieMap.has('LOGIN_INFO') || cookieMap.has('SAPISID');
+    console.log([GVC Cookies] Retrieved  cookies across stores (Authenticated: ));
+
+    return Array.from(cookieMap.entries()).map(([k, v]) => ${k}=).join('; ');
+  } catch (err) {
+    console.warn('[GVC Cookies] Failed to retrieve cookies:', err);
+    return '';
+  }
+}
+
+// Ensure declarativeNetRequest rule 1005 & 1006 rewrite Origin/Referer/Cookie for YouTube & GoogleVideo requests
+async function ensureYouTubeBypassRules(cookies) {
+  if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
+  try {
+    const requestHeaders = [
+      { header: 'Origin', operation: 'set', value: 'https://www.youtube.com' },
+      { header: 'Referer', operation: 'set', value: 'https://www.youtube.com/' }
+    ];
+    if (cookies && typeof cookies === 'string' && cookies.length > 0) {
+      requestHeaders.push({ header: 'Cookie', operation: 'set', value: cookies });
+    }
+
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [1005, 1006],
+      addRules: [
+        {
+          id: 1005,
+          priority: 2,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders
+          },
+          condition: {
+            urlFilter: '||youtube.com/',
+            resourceTypes: ['xmlhttprequest', 'other']
+          }
+        },
+        {
+          id: 1006,
+          priority: 2,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders
+          },
+          condition: {
+            urlFilter: '||googlevideo.com/videoplayback',
+            resourceTypes: ['xmlhttprequest', 'other']
+          }
+        }
+      ]
+    });
+  } catch (err) {
+    console.debug('[GVC DNR] Failed to set YouTube/GoogleVideo bypass rule:', err);
+  }
+}
+ensureYouTubeBypassRules();
 
 async function configureCdnBypassRules(targetUrl, refererUrl) {
   if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
@@ -1954,7 +2066,8 @@ async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, qua
 async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', mediaType = 'video', label, autoUpload, apiKey }, send, portSessions, tabId) {
   startKeepAlive();
   try {
-    send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine (Android Client)...' });
+    await ensureYouTubeBypassRules();
+    send({ type: 'PROGRESS', message: 'Initializing YouTube.js engine...' });
 
     if (typeof globalThis.Innertube === 'undefined') {
       throw new Error('YouTube.js engine is not loaded in service worker.');
@@ -1963,8 +2076,13 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     let activeTabId = tabId;
     if (!activeTabId) {
       try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (activeTab) activeTabId = activeTab.id;
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs[0]?.id && (tabs[0].url?.includes('youtube.com') || tabs[0].url?.includes('youtu.be'))) {
+          activeTabId = tabs[0].id;
+        } else {
+          const ytTabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
+          if (ytTabs.length > 0 && ytTabs[0]?.id) activeTabId = ytTabs[0].id;
+        }
       } catch (_) {}
     }
 
@@ -1993,6 +2111,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
       // to execute with genuine same-origin https://www.youtube.com context, bypassing 403 Forbidden
       if (activeTabId && (url.includes('youtube.com') || url.includes('/youtubei/'))) {
         const tabRes = await new Promise((resolve) => {
+          let timer = setTimeout(() => resolve(null), 6000);
           try {
             chrome.tabs.sendMessage(activeTabId, {
               type: 'TAB_FETCH',
@@ -2000,7 +2119,8 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
               method,
               headers,
               body: typeof body === 'string' ? body : undefined
-            }, (res) => {
+            }, { frameId: 0 }, (res) => {
+              clearTimeout(timer);
               if (chrome.runtime.lastError || !res || !res.status) {
                 resolve(null);
               } else {
@@ -2008,6 +2128,7 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
               }
             });
           } catch (_) {
+            clearTimeout(timer);
             resolve(null);
           }
         });
@@ -2021,17 +2142,95 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
         }
       }
 
-      // Direct service-worker fetch (for media chunks or standalone fallback)
-      return globalThis.fetch.call(globalThis, input, init);
+      // Direct service-worker fetch: set Origin & Referer to ensure YouTube WAF never returns 403
+      if (url.includes('youtube.com') || url.includes('/youtubei/')) {
+        headers['Origin'] = 'https://www.youtube.com';
+        headers['Referer'] = `https://www.youtube.com/watch?v=${videoId}`;
+      }
+      const directInit = Object.assign({}, init, {
+        method,
+        headers,
+        body: (method !== 'GET' && method !== 'HEAD') ? body : undefined
+      });
+      return globalThis.fetch.call(globalThis, url, directInit);
     };
 
+    const ytCookies = await getYouTubeAuthCookies();
+    await ensureYouTubeBypassRules(ytCookies);
+
+    // Setup global decipher evaluator delegate in case MV3 CSP blocks new Function in service worker
+    globalThis.customJsEvaluatorAsync = async (_data24, _env) => {
+      if (activeTabId) {
+        try {
+          const evalRes = await new Promise((resolve) => {
+            let timer = setTimeout(() => resolve(null), 4000);
+            chrome.tabs.sendMessage(activeTabId, {
+              type: 'TAB_EVAL',
+              code: _data24?.output
+            }, { frameId: 0 }, (res) => {
+              clearTimeout(timer);
+              if (chrome.runtime.lastError || !res || !res.ok) resolve(null);
+              else resolve(res.result);
+            });
+          });
+          if (evalRes) return evalRes;
+        } catch (_) {}
+      }
+      throw new Error('Player decipher evaluator failed');
+    };
+
+    const primaryClient = ytCookies ? 'MWEB' : 'ANDROID';
     const yt = await globalThis.Innertube.create({
-      client_type: 'ANDROID',
+      client_type: primaryClient,
+      cookie: ytCookies || undefined,
       fetch: hybridFetch
     });
-    send({ type: 'PROGRESS', message: 'Extracting direct media formats...' });
 
-    const info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
+    send({ type: 'PROGRESS', message: 'Resolving YouTube media formats across clients...' });
+
+    let info = null;
+    let lastPlayabilityStatus = null;
+    // When cookies are present, prioritize MWEB and WEB because browser cookies authenticate web clients
+    const clientOrder = ytCookies
+      ? ['MWEB', 'WEB', 'ANDROID', 'IOS', 'TV_EMBEDDED']
+      : ['ANDROID', 'IOS', 'MWEB', 'WEB', 'TV_EMBEDDED'];
+
+    for (const clientName of clientOrder) {
+      try {
+        const candInfo = await yt.getBasicInfo(videoId, { client: clientName });
+        const candFormats = (candInfo.streaming_data?.formats || []).concat(candInfo.streaming_data?.adaptive_formats || []);
+        if (candFormats.length > 0) {
+          // Decipher any signatureCipher formats if present
+          for (const f of candFormats) {
+            if (!f.url && (f.signature_cipher || f.cipher)) {
+              try {
+                const u = await f.decipher(yt.session?.player);
+                if (u) f.url = u;
+              } catch (_) {}
+            }
+          }
+          if (candFormats.some(f => f.url)) {
+            info = candInfo;
+            break;
+          }
+          if (!info) info = candInfo;
+        }
+        if (candInfo.playability_status) {
+          lastPlayabilityStatus = candInfo.playability_status;
+        }
+      } catch (err) {
+        console.warn(`[GVC Background] Client ${clientName} failed for ${videoId}:`, err.message);
+      }
+    }
+
+    if (!info || !info.streaming_data) {
+      if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
+        const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
+        throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
+      }
+      throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
+    }
+
     const videoTitle = info.basic_info?.title || label || 'YouTube Video';
     const cpn = info.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
 
@@ -2069,7 +2268,37 @@ async function handleYouTubeDownloadWithYouTubeJS({ videoId, quality = '360p', m
     }
 
     if (!selectedFormat || !selectedFormat.url) {
-      throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct) for instant zero-bandwidth analysis.');
+      // Sniffed stream rescue path: check if the tab's active player has already sniffed a playing stream
+      if (activeTabId && TAB_MEDIA_STREAMS.has(activeTabId)) {
+        const tabStreams = Array.from(TAB_MEDIA_STREAMS.get(activeTabId).values());
+        const gvStreams = tabStreams.filter(s => s && s.url && s.url.includes('googlevideo.com/videoplayback'));
+        if (gvStreams.length > 0) {
+          let bestGv = gvStreams.find(s => s.height === 360 || s.label?.includes('360')) ||
+                       gvStreams.find(s => s.height > 0 && !s.isAudio) ||
+                       gvStreams[0];
+          if (bestGv && bestGv.url) {
+            console.log('[GVC Background] Rescuing age-restricted download via tab sniffed googlevideo stream:', bestGv.url.slice(0, 80));
+            return await handleDownloadResolvedYouTubeStream({
+              streamUrl: bestGv.url,
+              totalLength: bestGv.sizeBytes || 0,
+              quality: bestGv.height ? `${bestGv.height}p` : '360p',
+              requestedQuality: quality,
+              isQualityFallback: false,
+              label: label || 'YouTube Video',
+              videoId,
+              videoTitle: label || 'YouTube Video',
+              autoUpload,
+              apiKey
+            }, send, portSessions, tabId);
+          }
+        }
+      }
+
+      if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
+        const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
+        throw new Error(`Age-Restricted Video: ${reason} YouTube restricts direct local download. Please switch to Mode 1 (Cloud Direct) which analyzes directly via Gemini.`);
+      }
+      throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
     }
 
     const streamUrl = `${selectedFormat.url}&cpn=${cpn}`;

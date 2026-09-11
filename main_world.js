@@ -809,7 +809,7 @@
         }
       }
     } else if (e.data.type === 'GVC_RESOLVE_YOUTUBE_STREAM') {
-      const { videoId, quality = '360p', mediaType = 'video', queryId } = e.data;
+      const { videoId, quality = '360p', mediaType = 'video', queryId, cookies: passedCookies } = e.data;
       (async () => {
         try {
           let InnertubeClass = window.Innertube || globalThis.Innertube;
@@ -820,12 +820,80 @@
               if (InnertubeClass) break;
             }
           }
-          if (!InnertubeClass) {
-            throw new Error('YouTube.js engine not loaded in page');
+
+          let formats = [];
+          let videoTitle = document.title.replace(' - YouTube', '').trim();
+          let inPagePlayerResponse = null;
+
+          // 1. Check in-page player response first (0ms latency, genuine session)
+          try {
+            const playerEl = document.getElementById('movie_player');
+            if (playerEl && typeof playerEl.getPlayerResponse === 'function') {
+              inPagePlayerResponse = playerEl.getPlayerResponse();
+            }
+          } catch (_) {}
+
+          if (!inPagePlayerResponse && typeof window.ytInitialPlayerResponse === 'object' && window.ytInitialPlayerResponse) {
+            inPagePlayerResponse = window.ytInitialPlayerResponse;
           }
-          const yt = await InnertubeClass.create({ client_type: 'ANDROID' });
-          const info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
-          const formats = (info.streaming_data?.formats || []).concat(info.streaming_data?.adaptive_formats || []);
+
+          if (inPagePlayerResponse && inPagePlayerResponse.streamingData) {
+            const sd = inPagePlayerResponse.streamingData;
+            const inPageFormats = (sd.formats || []).concat(sd.adaptiveFormats || []);
+            if (inPageFormats.length > 0) {
+              formats = inPageFormats;
+              if (inPagePlayerResponse.videoDetails?.title) {
+                videoTitle = inPagePlayerResponse.videoDetails.title;
+              }
+            }
+          }
+
+          // 2. If in-page formats not available or lack direct urls, resolve via Innertube waterfall with cookies
+          let info = null;
+          let lastPlayabilityStatus = inPagePlayerResponse?.playabilityStatus || null;
+
+          if (!formats.length || !formats.some(f => f.url)) {
+            if (!InnertubeClass) {
+              throw new Error('YouTube.js engine not loaded in page');
+            }
+            const activeCookie = passedCookies || document.cookie || undefined;
+            const primaryClient = activeCookie ? 'MWEB' : 'ANDROID';
+            const yt = await InnertubeClass.create({
+              client_type: primaryClient,
+              cookie: activeCookie
+            });
+
+            const clientList = activeCookie
+              ? ['MWEB', 'WEB', 'ANDROID', 'IOS']
+              : ['ANDROID', 'IOS', 'MWEB', 'WEB'];
+
+            for (const c of clientList) {
+              try {
+                const candInfo = await yt.getBasicInfo(videoId, { client: c });
+                const candFormats = (candInfo.streaming_data?.formats || []).concat(candInfo.streaming_data?.adaptive_formats || []);
+                if (candFormats.length > 0) {
+                  for (const f of candFormats) {
+                    if (!f.url && (f.signature_cipher || f.cipher)) {
+                      try {
+                        const u = await f.decipher(yt.session?.player);
+                        if (u) f.url = u;
+                      } catch (_) {}
+                    }
+                  }
+                  if (candFormats.some(f => f.url)) {
+                    formats = candFormats;
+                    info = candInfo;
+                    if (candInfo.basic_info?.title) videoTitle = candInfo.basic_info.title;
+                    break;
+                  }
+                  if (!formats.length) formats = candFormats;
+                }
+                if (candInfo.playability_status) {
+                  lastPlayabilityStatus = candInfo.playability_status;
+                }
+              } catch (_) {}
+            }
+          }
 
           let selectedFormat = null;
           const isAudioOnly = mediaType === 'audio';
@@ -858,15 +926,18 @@
           }
 
           if (!selectedFormat || !selectedFormat.url) {
+            if (lastPlayabilityStatus?.status === 'LOGIN_REQUIRED') {
+              const reason = lastPlayabilityStatus.reason || 'This video is age-restricted or requires sign-in.';
+              throw new Error(`Age-Restricted Video: ${reason} Please use Mode 1 (Cloud Direct).`);
+            }
             throw new Error('No direct stream URL available on YouTube.js. Please use Mode 1 (Cloud Direct).');
           }
 
-          const cpn = info.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+          const cpn = info?.cpn || Array.from({ length: 16 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
           const streamUrl = `${selectedFormat.url}&cpn=${cpn}`;
           const totalLength = parseInt(selectedFormat.content_length, 10) || 0;
           const actualQuality = selectedFormat.quality_label || (selectedFormat.itag === 18 ? '360p' : (isAudioOnly ? 'Audio' : 'SD'));
           const isQualityFallback = !isAudioOnly && Boolean(quality && quality !== 'auto' && quality !== actualQuality);
-          const videoTitle = info.basic_info?.title || document.title.replace(' - YouTube', '');
 
           window.postMessage({
             type: 'GVC_RESOLVE_YOUTUBE_STREAM_RES',
