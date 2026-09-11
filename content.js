@@ -6566,10 +6566,18 @@ async function startTabStreamingDownload({
         ? value.buffer
         : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
 
+      let binary = '';
+      const bytes = new Uint8Array(chunkBuffer);
+      const len = bytes.byteLength;
+      for (let i = 0; i < len; i += 8192) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, len)));
+      }
+      const base64Chunk = btoa(binary);
+
       port.postMessage({
         type: 'STREAM_TRANSFER_CHUNK',
         transferId,
-        chunk: chunkBuffer
+        chunk: base64Chunk
       });
 
       if (actualTotal > 0) {
@@ -6709,16 +6717,19 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
           return;
         }
 
-        startTabStreamingDownload({
+        connectPort();
+        port.postMessage({
+          type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
           streamUrl: event.data.streamUrl,
           totalLength: event.data.totalLength,
-          quality: '360p',
-          isQualityFallback: false,
+          quality: event.data.actualQuality || '360p',
+          requestedQuality: '360p',
+          isQualityFallback: Boolean(event.data.isQualityFallback),
+          label: event.data.videoTitle || currentYouTubeData.title,
           videoId: currentYouTubeData.videoId,
-          videoTitle: event.data.videoTitle,
+          videoTitle: event.data.videoTitle || currentYouTubeData.title,
           autoUpload: true,
-          apiKey: apiKey,
-          forChat: Boolean(forChat)
+          apiKey: apiKey
         });
       }
     };
@@ -7296,17 +7307,23 @@ async function handleMainActionClick() {
                 return;
               }
 
-              // Resolved directly from YouTube page with genuine same-origin!
-              startTabStreamingDownload({
+              const totalMB = event.data.totalLength > 0 ? (event.data.totalLength / 1024 / 1024).toFixed(1) : null;
+              const statusMsg = `Downloading video stream (${totalMB ? `${totalMB} MB` : 'in progress'})...`;
+              if (elOut) elOut.innerText = statusMsg;
+
+              connectPort();
+              port.postMessage({
+                type: 'DOWNLOAD_RESOLVED_YOUTUBE_STREAM',
                 streamUrl: event.data.streamUrl,
                 totalLength: event.data.totalLength,
-                quality: '360p',
-                isQualityFallback: false,
+                quality: event.data.actualQuality || '360p',
+                requestedQuality: '360p',
+                isQualityFallback: Boolean(event.data.isQualityFallback),
+                label: event.data.videoTitle || currentYouTubeData.title,
                 videoId: currentYouTubeData.videoId,
-                videoTitle: event.data.videoTitle,
+                videoTitle: event.data.videoTitle || currentYouTubeData.title,
                 autoUpload: true,
-                apiKey: apiKey,
-                forChat: false
+                apiKey: apiKey
               });
             }
           };

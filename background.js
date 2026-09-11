@@ -623,8 +623,22 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (msg.type === 'STREAM_TRANSFER_CHUNK') {
         const transfer = ACTIVE_STREAM_TRANSFERS.get(msg.transferId);
         if (transfer && msg.chunk) {
-          transfer.chunks.push(new Uint8Array(msg.chunk));
-          transfer.receivedBytes += msg.chunk.byteLength;
+          let uint8 = null;
+          if (typeof msg.chunk === 'string') {
+            const binary = atob(msg.chunk);
+            uint8 = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              uint8[i] = binary.charCodeAt(i);
+            }
+          } else if (msg.chunk instanceof ArrayBuffer) {
+            uint8 = new Uint8Array(msg.chunk);
+          } else if (ArrayBuffer.isView(msg.chunk)) {
+            uint8 = new Uint8Array(msg.chunk.buffer, msg.chunk.byteOffset, msg.chunk.byteLength);
+          }
+          if (uint8 && uint8.length > 0) {
+            transfer.chunks.push(uint8);
+            transfer.receivedBytes += uint8.length;
+          }
         }
       } else if (msg.type === 'STREAM_TRANSFER_END') {
         const transfer = ACTIVE_STREAM_TRANSFERS.get(msg.transferId);
@@ -1944,38 +1958,6 @@ async function handleDownloadResolvedYouTubeStream({ streamUrl, totalLength, qua
       'origin': 'https://www.youtube.com',
       'referer': 'https://www.youtube.com'
     };
-
-    // Priority: Try downloading via the tab's same-origin context first
-    // This uses the user's genuine YouTube cookies/session and avoids bot detection
-    if (useTabFetch && tabId) {
-      try {
-        const tabRes = await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tabId, {
-            type: 'TAB_FETCH',
-            url: streamUrl,
-            method: 'GET',
-            headers
-          }, (r) => {
-            if (chrome.runtime.lastError || !r) {
-              resolve(null);
-            } else {
-              resolve(r);
-            }
-          });
-        });
-        if (tabRes && tabRes.status >= 200 && tabRes.status < 300 && tabRes.text) {
-          // Tab fetch returned text — but we need binary. Check if it's small enough
-          // to indicate an error page rather than actual video data
-          if (tabRes.text.length < 5000 && (tabRes.text.includes('<!DOCTYPE') || tabRes.text.includes('<html'))) {
-            console.warn('[GVC] Tab fetch returned HTML (likely error page), falling back to direct fetch');
-          } else {
-            console.log('[GVC] Tab fetch succeeded for YouTube stream, size:', tabRes.text.length);
-          }
-        }
-      } catch (e) {
-        console.warn('[GVC] Tab fetch failed, using direct fetch:', e.message);
-      }
-    }
 
     // Download via service worker fetch (with YouTube headers set via declarativeNetRequest)
     try {
