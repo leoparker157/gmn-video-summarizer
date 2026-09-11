@@ -2505,18 +2505,6 @@ if (box) {
         <input type="range" id="gvc-v-retry-delay" min="500" max="10000" step="100" value="${esc(S.gic_v_retry_after_ms || 2200)}">
       </div>
 
-      <div class="gvc-divider"></div>
-      <div class="gvc-section-title">🎬 Stream Quality & Dimensions</div>
-      <div style="font-size:11px;color:#71767b;margin-bottom:5px;">Choose your default resolution behavior for video streams:</div>
-      <select id="gvc-v-quality-pref" style="margin-bottom:8px;">
-        <option value="ai_optimal" ${S.gic_v_preferred_quality === 'ai_optimal' ? 'selected' : ''}>⚡ AI Optimal (360p/480p — Fast, Lowest Errors) [Recommended]</option>
-        <option value="lowest" ${S.gic_v_preferred_quality === 'lowest' ? 'selected' : ''}>⚡ Smallest File (270p/360p — Minimal Size & Chunks)</option>
-        <option value="auto" ${S.gic_v_preferred_quality === 'auto' ? 'selected' : ''}>🎯 Auto (Match Video Player Quality)</option>
-        <option value="480" ${S.gic_v_preferred_quality === '480' ? 'selected' : ''}>⚡ 480p SD (Fast & Reliable)</option>
-        <option value="720" ${S.gic_v_preferred_quality === '720' ? 'selected' : ''}>💎 720p HD (Balanced)</option>
-        <option value="1080" ${S.gic_v_preferred_quality === '1080' ? 'selected' : ''}>🌟 1080p Full HD (Highest Quality)</option>
-        <option value="ask" ${S.gic_v_preferred_quality === 'ask' ? 'selected' : ''}>📋 Ask Every Time (Show Quality Menu First)</option>
-      </select>
 
       <div class="gvc-divider"></div>
       <div class="gvc-section-title">🔘 Button Overlay Settings</div>
@@ -2690,7 +2678,7 @@ function getSettingsFromUI() {
     gic_v_sequence: JSON.stringify(seq),
     gic_v_clean_braille: true,
     gic_v_show_video_badge: el('gvc-v-show-badge') ? el('gvc-v-show-badge').checked : (S.gic_v_show_video_badge !== false),
-    gic_v_preferred_quality: el('gvc-v-quality-pref') ? el('gvc-v-quality-pref').value : (S.gic_v_preferred_quality || 'auto'),
+    gic_v_preferred_quality: S.gic_v_preferred_quality || 'auto',
     gic_v_adv_tools_open: false,
   };
 }
