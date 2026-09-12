@@ -1,3 +1,13 @@
+# Developer & AI Agent Configurations (Developer-only access)
+.agents/
+AGENTS.md
+GEMINI.md
+.gemini/
+.claude/
+apply_icon.py
+scratch/
+docs/
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -10,24 +20,19 @@ desktop.ini
 
 # Logs
 *.log
-
-# Node (if tooling is added later)
-node_modules/
 npm-debug.log*
 
-# Build / packaging output
+# Node / Dependencies
+node_modules/
+
+# Build & Packaging output
 *.zip
 *.crx
 *.pem
 dist/
 
-# Local secrets / env
+# Local secrets & environment
 .env
 .env.local
-
-# Local helper scripts & icon explorations
-apply_icon.py
-docs/
-
+.env.*
 *.bat
-scratch/
