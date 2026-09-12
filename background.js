@@ -1792,7 +1792,9 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
     // Probe existing file link to verify it is still ACTIVE and not expired
     if (fileResourceName) {
       try {
-        const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileResourceName}?key=${encodeURIComponent(apiKey)}`);
+        const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileResourceName}?key=${encodeURIComponent(apiKey)}`, {
+          headers: { 'x-goog-api-key': apiKey }
+        });
         if (checkRes.ok) {
           const fileMeta = await checkRes.json();
           fileState = fileMeta.state;
@@ -2234,6 +2236,7 @@ async function initResumableUpload(blob, apiKey, maxRetries = 3) {
             'X-Goog-Upload-Header-Content-Length': String(blob.size),
             'X-Goog-Upload-Header-Content-Type': uploadMime,
             'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
           },
           body: JSON.stringify({ file: { display_name: `universal_video_${Date.now()}` } }),
         }
@@ -2350,7 +2353,9 @@ async function pollFileState(fileResourceName, apiKey, send, abortState = null) 
     pollAttempts++;
 
     try {
-      const checkRes = await fetch(fileApiUrl);
+      const checkRes = await fetch(fileApiUrl, {
+        headers: { 'x-goog-api-key': apiKey }
+      });
       if (!checkRes.ok) {
         const status = checkRes.status;
         const errText = await checkRes.text().catch(() => '');
@@ -2641,7 +2646,8 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
         res = await fetch(endpoint, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-goog-api-key': cleanApiKey
           },
           body: JSON.stringify(payload),
           signal: controller.signal
@@ -2916,7 +2922,9 @@ async function generateWithAutoRetry(model, apiKey, payload, maxRetries, retryDe
 // ── Fetch Models List ─────────────────────────────────────────────────────────
 async function handleFetchModels(apiKey, send) {
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`);
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`, {
+      headers: { 'x-goog-api-key': apiKey }
+    });
     if (!res.ok) {
       const err = await res.text();
       send({ type: 'MODELS_ERROR', message: `HTTP ${res.status}: ${err}` });

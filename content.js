@@ -92,8 +92,9 @@ function teardownIfOrphaned() {
       port = null;
     }
     try { window.removeEventListener('popstate', checkSpaUrlNavigation); } catch (_) {}
-    try { window.removeEventListener('scroll', debouncedScan); } catch (_) {}
     try { document.querySelectorAll('.gvc-vid-badge').forEach(b => b.remove()); } catch (_) {}
+    try { const r = document.getElementById('gvc-root-container'); if (r) r.remove(); } catch (_) {}
+    try { if (typeof box !== 'undefined' && box) box.remove(); } catch (_) {}
     return true;
   }
   return false;
@@ -1986,7 +1987,7 @@ function handlePortMessage(msg) {
           histItem.text = ansText;
         }
 
-        const msgDiv = document.getElementById(currentPendingRetryModelId);
+        const msgDiv = el(currentPendingRetryModelId);
         if (msgDiv) {
           const bubble = msgDiv.querySelector('.gvc-chat-bubble');
           if (bubble) bubble.innerHTML = formatResponseHTML(ansText);
@@ -2359,6 +2360,13 @@ function updateModelDropdown(selectedId) {
 // ── Build Main UI DOM (Only in Top Frame to allow dragging anywhere across viewport) ──
 const isTopFrame = (window.self === window.top);
 
+const host = isTopFrame ? document.createElement('div') : null;
+if (host) {
+  host.id = 'gvc-root-container';
+  host.style.cssText = 'all: initial !important; position: static !important;';
+}
+
+const shadowRoot = host ? host.attachShadow({ mode: 'closed' }) : null;
 const box = isTopFrame ? document.createElement('div') : null;
 const show = (v) => v ? 'block' : 'none';
 const chk  = (v) => v ? 'checked' : '';
@@ -2657,11 +2665,20 @@ if (box) {
   </div>
   </div>
 `;
-  document.body.appendChild(box);
+  if (box && shadowRoot) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = chrome.runtime.getURL('content.css');
+    shadowRoot.appendChild(link);
+    shadowRoot.appendChild(box);
+    (document.body || document.documentElement).appendChild(host);
+  } else if (box) {
+    (document.body || document.documentElement).appendChild(box);
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const el    = (id) => document.getElementById(id);
+const el    = (id) => (box ? box.querySelector('#' + id) : document.getElementById(id));
 const flash = (id) => {
   const e = el(id);
   if (e) { e.classList.add('gvc-show'); setTimeout(() => e.classList.remove('gvc-show'), 1500); }
@@ -5935,10 +5952,8 @@ function appendChatMessage(role, text, options = {}) {
 
   if (role === 'user') {
     bubble.textContent = text;
-  } else if (role === 'model') {
-    bubble.innerHTML = formatResponseHTML(text);
   } else {
-    bubble.innerHTML = text;
+    bubble.innerHTML = formatResponseHTML(text);
   }
   msgDiv.appendChild(bubble);
 
@@ -6098,7 +6113,7 @@ function navigateModelResponse(modelMsgId, delta) {
   item.selectedIdx = newIdx;
   item.text = item.responses[newIdx];
 
-  const msgDiv = document.getElementById(modelMsgId);
+  const msgDiv = el(modelMsgId);
   if (!msgDiv) return;
 
   const bubble = msgDiv.querySelector('.gvc-chat-bubble');
@@ -6121,7 +6136,7 @@ function triggerModelRegeneration(modelMsgId) {
   if (isChatSending) return;
 
   const modelItem = chatHistory.find(m => m.id === modelMsgId);
-  const msgDiv = document.getElementById(modelMsgId);
+  const msgDiv = el(modelMsgId);
   let userQuery = (modelItem && modelItem.userQuery) || (msgDiv && msgDiv.dataset.userQuery);
 
   if (!userQuery && modelItem && modelItem.userMsgId) {
@@ -6162,7 +6177,7 @@ function triggerUserMessageRetry(userMsgId) {
     pendingChatQueryAfterUpload = null;
   }
 
-  const userDiv = document.getElementById(userMsgId);
+  const userDiv = el(userMsgId);
   const histItem = chatHistory.find(m => m.id === userMsgId);
   let userQuery = (histItem && histItem.text) || (userDiv ? userDiv.querySelector('.gvc-chat-bubble')?.textContent?.trim() : '') || '';
 
@@ -6178,7 +6193,7 @@ function triggerUserMessageRetry(userMsgId) {
   // Clean up any stale error messages directly following this user query
   const errItems = chatHistory.filter(m => m.role === 'model' && m.isError && m.userMsgId === userMsgId);
   for (const errItem of errItems) {
-    const elErr = document.getElementById(errItem.id);
+    const elErr = el(errItem.id);
     if (elErr && elErr.parentNode) {
       elErr.parentNode.removeChild(elErr);
     }
@@ -6196,7 +6211,7 @@ function triggerUserMessageRetry(userMsgId) {
 function triggerErrorRetry(errorMsgId) {
   if (isChatSending) return;
 
-  const errDiv = document.getElementById(errorMsgId);
+  const errDiv = el(errorMsgId);
   let userQuery = errDiv ? errDiv.dataset.userQuery : '';
   let userMsgId = errDiv ? errDiv.dataset.userMsgId : null;
   const bubble = errDiv ? errDiv.querySelector('.gvc-chat-bubble') : null;
@@ -6227,7 +6242,7 @@ function triggerErrorRetry(errorMsgId) {
   }
 
   if (!userQuery && userMsgId) {
-    const userDiv = document.getElementById(userMsgId);
+    const userDiv = el(userMsgId);
     if (userDiv) {
       const bubble = userDiv.querySelector('.gvc-chat-bubble');
       if (bubble) userQuery = bubble.textContent.trim();
@@ -6790,7 +6805,7 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
           const elOut = el('gvc-out');
           if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
           const disp = el('gvc-vid-display');
-          if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
+          if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${esc(errMsg)}`;
           return;
         }
 
@@ -6833,7 +6848,7 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
         const elOut = el('gvc-out');
         if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
         const disp = el('gvc-vid-display');
-        if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
+        if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${esc(errMsg)}`;
       }
     }, 4000);
 
@@ -7376,7 +7391,7 @@ async function handleMainActionClick() {
                 updateActionButtonState();
                 if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
                 const disp = el('gvc-vid-display');
-                if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
+                if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${esc(errMsg)}`;
                 return;
               }
 
@@ -7421,7 +7436,7 @@ async function handleMainActionClick() {
               const errMsg = 'YouTube player took too long to respond. Please ensure the video is playing and click Summarize again.';
               if (elOut) elOut.innerText = `⚠️ ${errMsg}`;
               const disp = el('gvc-vid-display');
-              if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${errMsg}`;
+              if (disp) disp.innerHTML = `<span style="color:#f87171;">⚠️</span> ${esc(errMsg)}`;
             }
           }, 4000);
           return;
@@ -7934,7 +7949,7 @@ function scanVideos() {
 // lastContextVideo initialized at module top
 document.addEventListener('contextmenu', (e) => {
   const t = e.target;
-  if (t && t.closest && t.closest('#gvc-box')) return; // Never intercept context menu inside extension panel
+  if (t && (t.id === 'gvc-root-container' || (t.closest && t.closest('#gvc-root-container, #gvc-box')))) return; // Never intercept context menu inside extension panel
 
   let v = null;
   if (t && t.tagName === 'VIDEO') {

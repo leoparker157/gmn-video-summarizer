@@ -59,7 +59,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["main_world.js", "mux.min.js", "youtubei.bundle.js"],
+      "resources": ["main_world.js", "mux.min.js", "youtubei.bundle.js", "content.css"],
       "matches": ["<all_urls>"]
     }
   ],
