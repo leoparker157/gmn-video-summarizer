@@ -305,7 +305,11 @@ async function loadItemAndPrepare(item) {
       isCloudDirect: isCloud,
       apiKeyLast4: item.apiKeyLast4 || '',
       createdAt: Date.now(),
-      autoOpen: true
+      autoOpen: true,
+      summaryText: item.summaryText || '',
+      summaryPayload: item.summaryPayload || null,
+      summaryJson: item.summaryJson || null,
+      chatHistory: Array.isArray(item.chatHistory) ? item.chatHistory : []
     }
   });
 

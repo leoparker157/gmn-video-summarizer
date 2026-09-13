@@ -1029,6 +1029,7 @@ function switchNavTab(tabName) {
       pnlSet.classList.remove('gvc-open');
       pnlSet.style.display = 'none';
     }
+    ensureContinueChatButtonVisible();
   }
 }
 
@@ -1036,6 +1037,7 @@ function prepareVideoDisplayWithCachedItem(item) {
   const display = el('gvc-vid-display');
   const elSend  = el('gvc-send');
   const elOut   = el('gvc-out');
+  const resArea = el('gvc-result-area');
 
   const isYtDirect = item.fileUri && (item.fileUri.includes('youtube.com') || item.fileUri.includes('youtu.be'));
   const isKeyMatch = isCachedItemKeyMatch(item);
@@ -1073,13 +1075,26 @@ function prepareVideoDisplayWithCachedItem(item) {
   if (elSend) {
     updateActionButtonState();
   }
-  if (elOut && lastSummaryText) {
-    elOut.innerHTML = formatResponseHTML(lastSummaryText);
+
+  if (item && item.summaryText && !lastSummaryText) {
+    lastSummaryText = item.summaryText;
+  }
+  if (item && item.summaryPayload && !lastSummaryPayload) {
+    lastSummaryPayload = item.summaryPayload;
+  }
+  if (item && item.summaryJson && !lastSummaryJson) {
+    lastSummaryJson = item.summaryJson;
+  }
+
+  const effectiveSummary = (lastSummaryText && typeof lastSummaryText === 'string' && lastSummaryText.trim()) ? lastSummaryText : (item?.summaryText || '');
+  if (elOut && effectiveSummary) {
+    elOut.innerHTML = formatResponseHTML(effectiveSummary);
+    if (resArea) resArea.style.display = 'block';
   }
   const elRawCached = el('gvc-raw');
-  if (elRawCached && (lastSummaryJson || lastSummaryText)) {
+  if (elRawCached && (lastSummaryJson || effectiveSummary)) {
     elRawCached.textContent = JSON.stringify(lastSummaryJson || {
-      candidates: [{ content: { parts: [{ text: lastSummaryText }] } }]
+      candidates: [{ content: { parts: [{ text: effectiveSummary }] } }]
     }, null, 2);
   }
   ensureContinueChatButtonVisible();
@@ -1094,6 +1109,17 @@ async function loadStorageItem(item) {
   const isKeyMatch = isCachedItemKeyMatch(item);
   const activeKeyLast4 = getActiveApiKeyLast4();
   const itemKeyLast4 = item.apiKeyLast4 || (item.apiKeyMasked ? item.apiKeyMasked.slice(-4) : '');
+
+  // Immediately restore summary and chat from history item so downstream UI calls have immediate access to it
+  if (item.summaryText && typeof item.summaryText === 'string' && item.summaryText.trim()) {
+    lastSummaryText = item.summaryText;
+    if (item.summaryPayload) lastSummaryPayload = item.summaryPayload;
+    if (item.summaryJson) lastSummaryJson = item.summaryJson;
+    hasAnalyzedCurrentVideo = true;
+  }
+  if (Array.isArray(item.chatHistory) && item.chatHistory.length > 0) {
+    chatHistory = item.chatHistory.slice();
+  }
 
   if (isSame) {
     currentGoogleFileUri = item.fileUri;
@@ -1117,6 +1143,13 @@ async function loadStorageItem(item) {
       };
     }
 
+    currentPendingUserMsgId = null;
+    currentPendingUserQuery = '';
+    currentPendingRetryModelId = null;
+
+    // Restore saved chat logs & summary FIRST so state is fully hydrated
+    const hasChat = await restoreSavedChatLogForCurrentVideo(item);
+
     if (currentYouTubeData) {
       if (userPreferredYouTubeMode) {
         currentYouTubeMode = userPreferredYouTubeMode;
@@ -1128,14 +1161,9 @@ async function loadStorageItem(item) {
       prepareVideoDisplayWithCachedItem(item);
     }
 
-    // Clear stale in-memory chat state before restoring this item's specific conversation
-    chatHistory = [];
-    currentPendingUserMsgId = null;
-    currentPendingUserQuery = '';
-    currentPendingRetryModelId = null;
+    ensureContinueChatButtonVisible();
 
-    const hasChat = await restoreSavedChatLogForCurrentVideo(item);
-    if (hasChat && chatHistory.length > 0) {
+    if ((hasChat || (Array.isArray(chatHistory) && chatHistory.length > 0)) && chatHistory.length > 0) {
       openChatPane();
     }
 
@@ -1156,7 +1184,11 @@ async function loadStorageItem(item) {
         isCloudDirect: item.isCloudDirect || !isGoogleFilesUri(item.fileUri) || item.sizeMB === '0',
         apiKeyLast4: itemKeyLast4,
         createdAt: Date.now(),
-        autoOpen: true
+        autoOpen: true,
+        summaryText: item.summaryText || lastSummaryText || '',
+        summaryPayload: item.summaryPayload || lastSummaryPayload || null,
+        summaryJson: item.summaryJson || lastSummaryJson || null,
+        chatHistory: Array.isArray(item.chatHistory) ? item.chatHistory : (Array.isArray(chatHistory) ? chatHistory : [])
       }
     });
     window.location.href = item.pageUrl;
@@ -1191,6 +1223,16 @@ async function checkTargetPreparationOnNavigation() {
       currentVideoLabel = target.pageTitle;
       currentVideoUrl = target.cleanUrl || target.pageUrl;
 
+      if (target.summaryText && target.summaryText.trim()) {
+        lastSummaryText = target.summaryText;
+        if (target.summaryPayload) lastSummaryPayload = target.summaryPayload;
+        if (target.summaryJson) lastSummaryJson = target.summaryJson;
+        hasAnalyzedCurrentVideo = true;
+      }
+      if (Array.isArray(target.chatHistory) && target.chatHistory.length > 0) {
+        chatHistory = target.chatHistory.slice();
+      }
+
       const isYouTube = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be') || target.platform === 'YouTube' || target.videoId;
       if (!currentYouTubeData && isYouTube) {
         const vidId = target.videoId || extractVideoIdentifier(window.location.href);
@@ -1203,6 +1245,8 @@ async function checkTargetPreparationOnNavigation() {
         };
       }
 
+      const hasChat = await restoreSavedChatLogForCurrentVideo(target);
+
       if (currentYouTubeData) {
         currentYouTubeMode = (!isGoogleFilesUri(target.fileUri) || target.isCloudDirect || target.sizeMB === '0') ? 1 : 2;
         renderYouTubeDualModeUI(currentYouTubeData);
@@ -1210,8 +1254,9 @@ async function checkTargetPreparationOnNavigation() {
         prepareVideoDisplayWithCachedItem(target);
       }
 
-      const hasChat = await restoreSavedChatLogForCurrentVideo(target);
-      if (hasChat && chatHistory.length > 0) {
+      ensureContinueChatButtonVisible();
+
+      if ((hasChat || (Array.isArray(chatHistory) && chatHistory.length > 0)) && chatHistory.length > 0) {
         openChatPane();
       }
     }
@@ -3957,7 +4002,7 @@ if (box) {
     }
 
     // Video Chat Controls
-    if (id === 'gvc-btn-continue' || id === 'gvc-chat-hdr-btn' || (target && target.closest && target.closest('#gvc-chat-hdr-btn'))) {
+    if (id === 'gvc-btn-continue' || (target && target.closest && target.closest('#gvc-btn-continue')) || id === 'gvc-chat-hdr-btn' || (target && target.closest && target.closest('#gvc-chat-hdr-btn'))) {
       if (box.classList.contains('gvc-chat-open')) {
         closeChatPane();
       } else {
@@ -6337,7 +6382,12 @@ async function saveCurrentChatLog() {
 
 function ensureContinueChatButtonVisible() {
   const outEl = el('gvc-out');
-  const summaryString = (lastSummaryText && typeof lastSummaryText === 'string') ? lastSummaryText.trim() : (outEl ? (outEl.innerText || '').trim() : '');
+  const summaryString = (lastSummaryText && typeof lastSummaryText === 'string' && lastSummaryText.trim().length > 0)
+    ? lastSummaryText.trim()
+    : (outEl ? ((outEl.innerText || outEl.textContent || '').trim()) : '');
+  if (!lastSummaryText && summaryString.length > 15) {
+    lastSummaryText = summaryString;
+  }
   const hasSummary = summaryString.length > 15;
   const userMsgCount = (Array.isArray(chatHistory) ? chatHistory.filter(m => m && m.role === 'user').length : 0);
   const hasChat = userMsgCount > 0;
@@ -6354,11 +6404,19 @@ function ensureContinueChatButtonVisible() {
     }
     if (btnCont) {
       btnCont.style.display = 'inline-flex';
-      const labelText = userMsgCount > 0 ? `Continue Chat (${userMsgCount})` : 'Continue Chat';
-      btnCont.innerHTML = `
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-        <span>${labelText}</span>
-      `;
+      const isChatOpen = box && box.classList.contains('gvc-chat-open');
+      if (isChatOpen) {
+        btnCont.innerHTML = `
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"></path></svg>
+          <span>Close Chat</span>
+        `;
+      } else {
+        const labelText = userMsgCount > 0 ? `Continue Chat (${userMsgCount})` : 'Continue Chat';
+        btnCont.innerHTML = `
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+          <span>${labelText}</span>
+        `;
+      }
     }
     if (btnNew) {
       btnNew.style.display = userMsgCount > 0 ? 'inline-flex' : 'none';
@@ -6430,6 +6488,18 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
       };
     }
 
+    // 2-Way Merge: If saved entry in logs is missing summaryText or chatHistory that targetItem HAS:
+    if (saved && targetItem) {
+      if ((!saved.summaryText || !saved.summaryText.trim()) && targetItem.summaryText && targetItem.summaryText.trim()) {
+        saved.summaryText = targetItem.summaryText;
+        if (!saved.summaryPayload && targetItem.summaryPayload) saved.summaryPayload = targetItem.summaryPayload;
+        if (!saved.summaryJson && targetItem.summaryJson) saved.summaryJson = targetItem.summaryJson;
+      }
+      if ((!Array.isArray(saved.chatHistory) || saved.chatHistory.length === 0) && Array.isArray(targetItem.chatHistory) && targetItem.chatHistory.length > 0) {
+        saved.chatHistory = targetItem.chatHistory.slice();
+      }
+    }
+
     if (!saved) {
       if (targetItem && !lastSummaryText) {
         chatHistory = [];
@@ -6454,29 +6524,31 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         currentGoogleFileUri = saved.fileUri;
       }
     }
-    if (saved.summaryText && saved.summaryText.trim()) {
-      lastSummaryText = saved.summaryText;
-      if (saved.summaryPayload) lastSummaryPayload = saved.summaryPayload;
+
+    const summaryToRestore = (saved.summaryText && saved.summaryText.trim()) || (targetItem && targetItem.summaryText && targetItem.summaryText.trim()) || lastSummaryText;
+    if (summaryToRestore) {
+      lastSummaryText = summaryToRestore;
+      if (saved.summaryPayload || targetItem?.summaryPayload) lastSummaryPayload = saved.summaryPayload || targetItem?.summaryPayload;
+      if (saved.summaryJson || targetItem?.summaryJson) lastSummaryJson = saved.summaryJson || targetItem?.summaryJson;
 
       hasAnalyzedCurrentVideo = true;
       updateActionButtonState();
 
       const elOut = el('gvc-out');
       if (elOut) {
-        elOut.innerHTML = formatResponseHTML(saved.summaryText);
+        elOut.innerHTML = formatResponseHTML(summaryToRestore);
         const resArea = el('gvc-result-area');
         if (resArea) resArea.style.display = 'block';
         const rawArea = el('gvc-raw');
         if (rawArea) {
           rawArea.style.display = 'none';
-          if (saved.summaryJson) {
-            lastSummaryJson = saved.summaryJson;
-            rawArea.textContent = JSON.stringify(saved.summaryJson, null, 2);
-          } else if (saved.summaryText) {
+          if (lastSummaryJson) {
+            rawArea.textContent = JSON.stringify(lastSummaryJson, null, 2);
+          } else {
             rawArea.textContent = JSON.stringify({
               candidates: [{
                 content: {
-                  parts: [{ text: saved.summaryText }]
+                  parts: [{ text: summaryToRestore }]
                 }
               }]
             }, null, 2);
@@ -6484,14 +6556,17 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         }
       }
 
-      if (saved.summaryJson && saved.summaryJson.usageMetadata) {
-        renderTokenUsage(saved.summaryJson.usageMetadata);
+      if (lastSummaryJson && lastSummaryJson.usageMetadata) {
+        renderTokenUsage(lastSummaryJson.usageMetadata);
       }
     }
 
     // 2. Restore real chat history
-    if (Array.isArray(saved.chatHistory) && saved.chatHistory.length > 0) {
-      chatHistory = saved.chatHistory.slice();
+    const chatToRestore = (Array.isArray(saved.chatHistory) && saved.chatHistory.length > 0)
+      ? saved.chatHistory
+      : (Array.isArray(targetItem?.chatHistory) && targetItem.chatHistory.length > 0 ? targetItem.chatHistory : (Array.isArray(chatHistory) ? chatHistory : []));
+    if (chatToRestore.length > 0) {
+      chatHistory = chatToRestore.slice();
       renderChatMessagesFromHistory(chatHistory);
 
       const userMsgCount = chatHistory.filter(m => m.role === 'user').length;
@@ -6505,7 +6580,7 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
     }
 
     ensureContinueChatButtonVisible();
-    return !!(saved.summaryText || (saved.chatHistory && saved.chatHistory.length > 0));
+    return !!(summaryToRestore || (chatToRestore && chatToRestore.length > 0));
   } catch (_) {
     return false;
   }
