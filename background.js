@@ -432,6 +432,12 @@ ensureContextMenu();
 
 // ── Forward Messages between Frames (e.g. Iframe Badge -> Top Frame Panel) ───
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && (msg.type === 'RELOAD_EXTENSION' || msg.action === 'RELOAD_EXTENSION')) {
+    try {
+      chrome.runtime.reload();
+    } catch (_) {}
+    return true;
+  }
   if (msg && msg.type === 'CHECK_NETWORK') {
     checkNetworkHealth().then(health => {
       try { sendResponse({ health }); } catch (_) {}

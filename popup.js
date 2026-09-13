@@ -198,7 +198,12 @@ function renderHistory(items) {
   if (!items || items.length === 0) {
     histList.innerHTML = `
       <div class="hist-empty">
-        <span class="hist-empty-icon">📭</span>
+        <div class="hist-empty-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline>
+            <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+          </svg>
+        </div>
         <div class="hist-empty-title">No Uploaded Videos Yet</div>
         <div class="hist-empty-desc">Videos uploaded to Google Gemini Files API storage will appear here for 48 hours for instant re-summarizing without re-downloading.</div>
       </div>
@@ -229,16 +234,29 @@ function renderHistory(items) {
 
         <div class="hist-uri-box">
           <code class="hist-uri-code" title="${esc(item.fileUri)}">${esc(resourceName)}</code>
-          <button type="button" class="btn-copy-uri" data-uri="${esc(item.fileUri)}" title="Copy Google Files API URI">📋 Copy</button>
+          <button type="button" class="btn-copy-uri" data-uri="${esc(item.fileUri)}" title="Copy Google Files API URI">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:3px;vertical-align:middle;">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>Copy
+          </button>
         </div>
 
         ${item.summarySnippet ? `<div class="hist-snippet">${esc(item.summarySnippet)}</div>` : ''}
 
         <div class="hist-card-actions">
           <button type="button" class="btn-load btn-load-target" data-id="${esc(item.id)}">
-            <span>⚡ Load & Prepare Tool</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+            </svg>
+            <span>Load & Prepare Tool</span>
           </button>
-          <button type="button" class="btn-del btn-del-item" data-id="${esc(item.id)}" title="Remove from history">🗑️</button>
+          <button type="button" class="btn-del btn-del-item" data-id="${esc(item.id)}" title="Remove from history">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
         </div>
       </div>
     `;
@@ -558,6 +576,17 @@ if (btnOpenPanel) {
       }
       window.close();
     });
+  });
+}
+
+// "Reload Extension" (Developer)
+const btnReloadExt = document.getElementById('btn-reload-ext');
+if (btnReloadExt) {
+  btnReloadExt.addEventListener('click', () => {
+    try {
+      chrome.runtime.reload();
+    } catch (_) {}
+    window.close();
   });
 }
 

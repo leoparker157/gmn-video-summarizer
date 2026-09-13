@@ -72,6 +72,7 @@ let chatPagination = {};
 let lastSummaryText = '';
 let lastSummaryPayload = null;
 let lastSummaryJson = null;
+let initialSummaryJson = null;
 let isChatSending = false;
 let lastSentChatQuery = '';
 let currentPendingUserMsgId = null;
@@ -1355,7 +1356,7 @@ function updateActionButtonState(customState = null) {
     }
 
     elSend.disabled = false;
-    elSend.innerText = '✨ Analyze Video (Cloud Direct)';
+    elSend.innerText = 'Analyze Video (Cloud Direct)';
     return;
   }
 
@@ -1367,13 +1368,13 @@ function updateActionButtonState(customState = null) {
 
     elSend.disabled = false;
     if (isKeyMismatch) {
-      elSend.innerText = '⬇️ Fetch & Upload (Key Mismatch)';
+      elSend.innerText = 'Fetch & Upload (Key Mismatch)';
     } else if (isReadyToAnalyze) {
       // Complete video is ready in memory or in Google Storage -> CLICK ANALYZE MEANS ANALYZE!
-      elSend.innerText = '✨ Analyze Video';
+      elSend.innerText = 'Analyze Video';
     } else {
       // File not yet fetched or user chose to re-download -> strictly show Fetch Video!
-      elSend.innerText = '⬇️ Fetch Video';
+      elSend.innerText = 'Fetch Video';
     }
     return;
   }
@@ -1384,13 +1385,13 @@ function updateActionButtonState(customState = null) {
   const isReady = !!(sessionId || (currentGoogleFileUri && !isGenericKeyMismatch));
   elSend.disabled = false;
   if (isGenericKeyMismatch) {
-    elSend.innerText = '⬇️ Download & Upload (Key Mismatch)';
+    elSend.innerText = 'Download & Upload (Key Mismatch)';
   } else if (isReady) {
-    elSend.innerText = '✨ Analyze Video';
+    elSend.innerText = 'Analyze Video';
   } else if (typeof availableVariants !== 'undefined' && availableVariants && availableVariants.length > 0) {
-    elSend.innerText = '⬇️ Download & Analyze';
+    elSend.innerText = 'Download & Analyze';
   } else {
-    elSend.innerText = '✨ Analyze Video';
+    elSend.innerText = 'Analyze Video';
   }
 }
 
@@ -1563,13 +1564,15 @@ function formatResponseHTML(raw) {
   formatted = formatted.replace(/\n\n+/g, '<div class="gvc-para-gap"></div>');
   formatted = formatted.replace(/\n/g, '<br>');
 
-  // Convert video timestamps to interactive seek buttons (supports MM:SS, HH:MM:SS, minutes >= 60 like 71:50, 120:25, all Unicode ranges/brackets/arrows/Asian punctuation/emojis)
-  formatted = formatted.replace(/(^|[^\p{L}\p{N}])((?:(\d{1,3}):)?(\d{1,4}):([0-5]\d))(?=$|[^\p{L}\p{N}:]|[:\uFF1A](?!\d))/gu, (match, prefix, timeStr) => {
-    const parts = timeStr.split(':').map(Number);
+  // Convert video timestamps to interactive seek buttons (supports MM:SS, HH:MM:SS, minutes >= 60 like 71:50, 120:25, Unicode Asian colons, emoji prefixes)
+  formatted = formatted.replace(/(^|[^\p{L}\p{N}])([⏱⏰🕐🕒⏳▶\s]*?)((?:(\d{1,3})[:\uFF1A])?(\d{1,4})[:\uFF1A]([0-5]\d))(?=$|[^\p{L}\p{N}:]|[:\uFF1A](?!\d))/gu, (match, prefix, leadingGlyph, timeStr) => {
+    const cleanTimeStr = timeStr.replace(/\uFF1A/g, ':');
+    const parts = cleanTimeStr.split(':').map(Number);
     let sec = 0;
     if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
     else if (parts.length === 2) sec = parts[0] * 60 + parts[1];
-    return `${prefix}<button type="button" class="gvc-ts-link" data-sec="${sec}" title="Seek video to ${timeStr}">⏱️ ${timeStr}</button>`;
+    const sep = (prefix && !/[\s\[\({\<"']/.test(prefix)) ? ' ' : '';
+    return `${prefix}${sep}<button type="button" class="gvc-ts-link" data-sec="${sec}" title="Seek video to ${cleanTimeStr}"><span class="gvc-ts-glyph">⏱</span>${cleanTimeStr}</button>`;
   });
 
   // Restore Code Blocks
@@ -1580,26 +1583,87 @@ function formatResponseHTML(raw) {
   return formatted;
 }
 
-function seekActiveVideoTo(sec) {
-  if (isNaN(sec) || sec < 0) return;
-  const v = findActiveVideo();
-  if (v) {
-    try {
+function applySeekToVideoElement(v, sec) {
+  if (!v) return false;
+  try {
+    if (typeof v.fastSeek === 'function') {
+      try { v.fastSeek(sec); } catch (_) { v.currentTime = sec; }
+    } else {
       v.currentTime = sec;
-      v.play().catch(() => {});
+    }
+    // Dispatch standard media events to notify custom web players (React, Vue, Twitter/X, Plyr, VideoJS)
+    try {
+      v.dispatchEvent(new Event('seeking', { bubbles: true }));
+      v.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+      v.dispatchEvent(new Event('seeked', { bubbles: true }));
     } catch (_) {}
+
+    // Auto-unpause / play from seeked timestamp
+    try {
+      const p = v.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (_) {}
+
+    // Smoothly scroll video into view if it was scrolled off-screen
+    try {
+      const r = v.getBoundingClientRect();
+      const inViewport = (r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth);
+      if (!inViewport && typeof v.scrollIntoView === 'function') {
+        v.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    } catch (_) {}
+    return true;
+  } catch (err) {
+    console.warn('[GVC] Direct seek failed on video element:', err);
+    return false;
   }
-  window.postMessage({ type: 'GVC_SEEK_PLAYER', seconds: sec }, '*');
 }
 
-// Global Delegator for Interactive Video Timestamps
+function seekActiveVideoTo(sec) {
+  if (isNaN(sec) || sec < 0) return;
+
+  // 1. Prioritize original targeted video element, then context video, then active video in current DOM
+  let v = (lastTargetVideoEl && lastTargetVideoEl.isConnected) ? lastTargetVideoEl : null;
+  if (!v) v = (lastContextVideo && lastContextVideo.isConnected) ? lastContextVideo : null;
+  if (!v) v = findActiveVideo();
+  if (v) {
+    applySeekToVideoElement(v, sec);
+  }
+
+  // 2. Broadcast to main_world in current frame (handles YouTube player API, Video.js, JWPlayer, etc.)
+  window.postMessage({ type: 'GVC_SEEK_PLAYER', seconds: sec }, '*');
+
+  // 3. Broadcast to all child iframe windows on the page
+  try {
+    const iframes = document.querySelectorAll('iframe');
+    for (const f of iframes) {
+      try {
+        if (f.contentWindow) {
+          f.contentWindow.postMessage({ type: 'GVC_SEEK_PLAYER', seconds: sec }, '*');
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  // 4. Relay to all frames in the tab via background worker
+  safeSendMessage({
+    type: 'BROADCAST_TO_ALL_FRAMES',
+    payload: { type: 'GVC_RELAY_SEEK', seconds: sec }
+  });
+}
+
+// Global Delegator for Interactive Video Timestamps (in Document and Outside Contexts)
 document.addEventListener('click', (e) => {
-  const tsBtn = e.target.closest('.gvc-ts-link');
+  const tsBtn = (e.target && typeof e.target.closest === 'function') ? e.target.closest('.gvc-ts-link') : null;
   if (tsBtn) {
     e.preventDefault();
     e.stopPropagation();
     const sec = parseFloat(tsBtn.dataset.sec);
     if (!isNaN(sec)) {
+      tsBtn.classList.add('gvc-ts-clicked');
+      setTimeout(() => {
+        try { tsBtn.classList.remove('gvc-ts-clicked'); } catch (_) {}
+      }, 800);
       seekActiveVideoTo(sec);
     }
   }
@@ -1812,6 +1876,36 @@ function handlePortMessage(msg) {
     }
   }
 
+function renderTokenUsage(usage) {
+  if (!usage) return;
+  const elUsage = el('gvc-token-usage');
+  if (!elUsage) return;
+
+  const promptTokens = usage.promptTokenCount != null ? Number(usage.promptTokenCount) : 0;
+  const candTokens = usage.candidatesTokenCount != null ? Number(usage.candidatesTokenCount) : 0;
+  const totalTokens = usage.totalTokenCount != null ? Number(usage.totalTokenCount) : (promptTokens + candTokens);
+
+  if (promptTokens > 0 || totalTokens > 0 || candTokens > 0) {
+    elUsage.style.display = 'flex';
+    const inEl = el('gvc-tok-in'); if (inEl) inEl.textContent = promptTokens.toLocaleString();
+    const outEl = el('gvc-tok-out'); if (outEl) outEl.textContent = candTokens.toLocaleString();
+    const totEl = el('gvc-tok-total'); if (totEl) totEl.textContent = totalTokens.toLocaleString();
+
+    const cachedTokens = usage.cachedContentTokenCount || 0;
+    if (cachedTokens > 0) {
+      elUsage.title = `Token Usage: ${promptTokens.toLocaleString()} input (${cachedTokens.toLocaleString()} cached) + ${candTokens.toLocaleString()} output = ${totalTokens.toLocaleString()} total`;
+    } else {
+      elUsage.title = `Token Usage: ${promptTokens.toLocaleString()} input + ${candTokens.toLocaleString()} output = ${totalTokens.toLocaleString()} total`;
+    }
+
+    try {
+      elUsage.classList.remove('gvc-token-updated');
+      void elUsage.offsetWidth;
+      elUsage.classList.add('gvc-token-updated');
+    } catch (_) {}
+  }
+}
+
   if (msg.type === 'RESULT') {
     isProcessing = false;
     isDownloading = false;
@@ -1821,20 +1915,12 @@ function handlePortMessage(msg) {
     if (elCncl) elCncl.style.display = 'none';
     try {
       const j = msg.json;
+      lastSummaryJson = j;
+      initialSummaryJson = j;
 
       // Update Token Usage Display
       const usage = (j && j.usageMetadata) || {};
-      const elUsage = el('gvc-token-usage');
-      if (elUsage && (usage.promptTokenCount != null || usage.totalTokenCount != null)) {
-        elUsage.style.display = 'flex';
-        const inTok = (usage.promptTokenCount || 0).toLocaleString();
-        const outTok = (usage.candidatesTokenCount || 0).toLocaleString();
-        const totTok = (usage.totalTokenCount || ((usage.promptTokenCount || 0) + (usage.candidatesTokenCount || 0))).toLocaleString();
-
-        const inEl = el('gvc-tok-in'); if (inEl) inEl.textContent = inTok;
-        const outEl = el('gvc-tok-out'); if (outEl) outEl.textContent = outTok;
-        const totEl = el('gvc-tok-total'); if (totEl) totEl.textContent = totTok;
-      }
+      renderTokenUsage(usage);
 
       const cand = j.candidates && j.candidates[0];
       const parts = cand && cand.content && cand.content.parts;
@@ -1965,6 +2051,14 @@ function handlePortMessage(msg) {
       const usage = (j && j.usageMetadata) || {};
       const cachedTokens = usage.cachedContentTokenCount || 0;
 
+      // Keep token usage display (Input, Output, Total) updated on every chat turn!
+      if (usage && (usage.promptTokenCount != null || usage.totalTokenCount != null || usage.candidatesTokenCount != null)) {
+        renderTokenUsage(usage);
+        if (lastSummaryJson) {
+          lastSummaryJson.usageMetadata = usage;
+        }
+      }
+
       const cand = j.candidates && j.candidates[0];
       const parts = cand && cand.content && cand.content.parts;
       let ansText = '';
@@ -2035,7 +2129,8 @@ function handlePortMessage(msg) {
           userQuery: queryText,
           responses: [ansText],
           selectedIdx: 0,
-          cachedTokens
+          cachedTokens,
+          usage
         });
 
         currentPendingUserMsgId = null;
@@ -2377,13 +2472,35 @@ if (box) {
   box.innerHTML = `
   <div id="gvc-header">
     <div id="gvc-title-wrap">
-      <span style="font-size:16px;">🌐</span>
-      <span id="gvc-title">GMN Universal Video Summarizer</span>
+      <div class="gvc-logo-badge" title="GMN Universal Video Summarizer">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+          <polygon points="10 8 15 10 10 12 10 8" fill="currentColor"></polygon>
+          <line x1="6" y1="21" x2="18" y2="21"></line>
+        </svg>
+      </div>
+      <span id="gvc-title">Universal Video Summarizer</span>
     </div>
     <div id="gvc-header-btns">
-      <button class="gvc-hdr-btn" id="gvc-history-btn" title="Uploaded Storage History">🕒<span id="gvc-history-badge" class="gvc-hdr-badge" style="display:none;">0</span></button>
-      <button class="gvc-hdr-btn" id="gvc-settings-btn" title="Settings / Presets">⚙️</button>
-      <button class="gvc-hdr-btn" id="gvc-close-btn" title="Close">✕</button>
+      <button class="gvc-hdr-btn" id="gvc-history-btn" title="Uploaded Storage History">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        <span id="gvc-history-badge" class="gvc-hdr-badge" style="display:none;">0</span>
+      </button>
+      <button class="gvc-hdr-btn" id="gvc-settings-btn" title="Settings / Presets">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+      <button class="gvc-hdr-btn" id="gvc-close-btn" title="Close">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
     </div>
   </div>
 
@@ -2391,31 +2508,43 @@ if (box) {
   <div id="gvc-content">
     <div class="gvc-nav-tabs">
       <button type="button" class="gvc-nav-tab active" id="gvc-nav-tab-main">
-        <span>📹 Summarizer</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+        <span>Summarizer</span>
       </button>
       <button type="button" class="gvc-nav-tab" id="gvc-nav-tab-history">
-        <span>🕒 Storage History</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+        <span>Storage History</span>
         <span class="gvc-tab-count-badge" id="gvc-tab-history-count" style="display:none;">0</span>
       </button>
       <button type="button" class="gvc-nav-tab" id="gvc-nav-tab-settings">
-        <span>⚙️ Settings</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+        <span>Settings</span>
       </button>
     </div>
 
     <div id="gvc-history" style="display:none;">
       <div class="gvc-hist-header">
         <div class="gvc-hist-info">
-          <div class="gvc-hist-title">☁️ Uploaded Storage History</div>
+          <div class="gvc-hist-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:5px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
+            Uploaded Storage History
+          </div>
           <div class="gvc-hist-desc">Videos uploaded to Google Gemini Files API (retained ~48 hours). Click any card to load the page and prepare the tool instantly.</div>
         </div>
         <div class="gvc-hist-actions">
-          <button type="button" class="gvc-btn-sub" id="gvc-hist-refresh-btn" title="Verify files with Google Gemini API & refresh">🔄 Verify API</button>
-          <button type="button" class="gvc-btn-sub" id="gvc-hist-clear-btn" title="Clear expired files from history">🗑️ Prune</button>
+          <button type="button" class="gvc-btn-sub" id="gvc-hist-refresh-btn" title="Verify files with Google Gemini API & refresh">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            <span>Verify API</span>
+          </button>
+          <button type="button" class="gvc-btn-sub" id="gvc-hist-clear-btn" title="Clear expired files from history">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            <span>Prune</span>
+          </button>
         </div>
       </div>
 
       <div class="gvc-hist-search-wrap">
-        <input type="text" id="gvc-hist-search" placeholder="🔍 Search storage by title, platform, or link...">
+        <input type="text" id="gvc-hist-search" placeholder="Search storage by title, platform, or link...">
       </div>
 
       <div id="gvc-hist-status" style="display:none;" class="gvc-hist-status-bar"></div>
@@ -2428,13 +2557,25 @@ if (box) {
         <div class="gvc-lbl" style="margin-top:0;">Preset Selection</div>
         <div class="gvc-preset-controls">
           <select id="gvc-preset-select" style="flex:1;"></select>
-          <button class="gvc-btn-icon" id="gvc-preset-save" title="Save current settings to active preset">💾</button>
-          <button class="gvc-btn-icon" id="gvc-preset-new" title="Save current settings as new preset">➕</button>
-          <button class="gvc-btn-icon" id="gvc-preset-del" title="Delete current preset">🗑️</button>
+          <button class="gvc-btn-icon" id="gvc-preset-save" title="Save current settings to active preset">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+          </button>
+          <button class="gvc-btn-icon" id="gvc-preset-new" title="Save current settings as new preset">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <button class="gvc-btn-icon" id="gvc-preset-del" title="Delete current preset">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          </button>
         </div>
         <div style="display:flex;gap:6px;margin-top:8px;">
-          <button class="gvc-btn-sub" id="gvc-preset-export" style="flex:1;">📤 Export Presets</button>
-          <button class="gvc-btn-sub" id="gvc-preset-import" style="flex:1;">📥 Import Presets</button>
+          <button class="gvc-btn-sub" id="gvc-preset-export" style="flex:1;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            <span>Export Presets</span>
+          </button>
+          <button class="gvc-btn-sub" id="gvc-preset-import" style="flex:1;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <span>Import Presets</span>
+          </button>
           <input type="file" id="gvc-preset-file-input" accept=".json,application/json" style="display:none;">
         </div>
       </div>
@@ -2442,12 +2583,17 @@ if (box) {
       <div class="gvc-lbl">Gemini API Key <span class="gvc-saved" id="gvc-v-key-saved">Saved</span></div>
       <div class="gvc-input-wrap">
         <input type="password" id="gvc-v-api-key" placeholder="Enter Gemini API Key..." value="${esc(S.gic_v_api_key)}">
-        <button class="gvc-toggle-eye" id="gvc-toggle-key" title="Show/Hide">👁️</button>
+        <button class="gvc-toggle-eye" id="gvc-toggle-key" title="Show/Hide">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        </button>
       </div>
 
       <div class="gvc-lbl" style="display:flex;justify-content:space-between;align-items:center;">
         <span>Model <span class="gvc-saved" id="gvc-v-model-saved">Saved</span></span>
-        <button id="gvc-update-models" class="gvc-link-btn">🔄 Update List</button>
+        <button id="gvc-update-models" class="gvc-link-btn">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          <span>Update List</span>
+        </button>
       </div>
       <div id="gvc-model-status" style="display:none;font-size:11px;margin-bottom:4px;font-weight:600;"></div>
       <select id="gvc-v-model">${buildModelOptions(currentModelGroups, S.gic_v_model)}</select>
@@ -2577,7 +2723,10 @@ if (box) {
     <div id="gvc-body">
       <div class="gvc-lbl" style="display:flex;justify-content:space-between;align-items:center;">
         <span>Source Media Info</span>
-        <button id="gvc-refetch-streams-btn" class="gvc-link-btn" title="Clear cached streams, reconnect to active video player, and fetch fresh streams from the page">🔄 Re-fetch Streams</button>
+        <button id="gvc-refetch-streams-btn" class="gvc-link-btn" title="Clear cached streams, reconnect to active video player, and fetch fresh streams from the page">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          <span>Re-fetch Streams</span>
+        </button>
       </div>
       <div id="gvc-vid-display" class="gvc-vid-info">Searching for video streams...</div>
 
@@ -2598,17 +2747,17 @@ if (box) {
         </div>
         <div id="gvc-token-usage" class="gvc-token-bar" style="display:none;">
           <div class="gvc-token-item" title="Input Tokens (Video frames + system prompt + user instructions)">
-            <span>📥</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m-4-4 4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
             <span>Input:</span>
             <span class="gvc-token-val" id="gvc-tok-in">0</span>
           </div>
           <div class="gvc-token-item" title="Output Tokens (AI generated text response)">
-            <span>📤</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3m4 4-4-4-4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
             <span>Output:</span>
             <span class="gvc-token-val" id="gvc-tok-out">0</span>
           </div>
           <div class="gvc-token-item" title="Total Tokens Used">
-            <span>⚡</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
             <span>Total:</span>
             <span class="gvc-token-val" id="gvc-tok-total">0</span>
           </div>
@@ -2618,8 +2767,14 @@ if (box) {
         <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center;">
           <button id="gvc-v-copy" class="gvc-btn-sub" style="padding:6px 14px;">Copy Response</button>
           <button id="gvc-toggle-raw" class="gvc-btn-sub" style="padding:6px 14px;">JSON</button>
-          <button id="gvc-btn-continue" class="gvc-btn-continue" style="display:none;" title="Continue asking questions about this video in multi-turn chat">💬 Continue Chat</button>
-          <button id="gvc-btn-new-chat" class="gvc-btn-continue gvc-btn-new-chat" style="display:none;" title="Start a fresh conversation from the beginning">➕ New Conversation</button>
+          <button id="gvc-btn-continue" class="gvc-btn-continue" style="display:none;" title="Continue asking questions about this video in multi-turn chat">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            <span>Continue Chat</span>
+          </button>
+          <button id="gvc-btn-new-chat" class="gvc-btn-continue gvc-btn-new-chat" style="display:none;" title="Start a fresh conversation from the beginning">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>New Conversation</span>
+          </button>
         </div>
       </div>
     </div>
@@ -2628,19 +2783,22 @@ if (box) {
   <div id="gvc-chat-pane">
     <div id="gvc-chat-header">
       <div class="gvc-chat-title-wrap">
-        <span style="font-size:14px;">✨</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
         <span class="gvc-chat-title">Video AI Chat</span>
         <span id="gvc-chat-badge" class="gvc-chat-badge">Session Ready</span>
       </div>
       <div class="gvc-chat-actions">
-        <button id="gvc-chat-new-conv" class="gvc-chat-btn-sub" title="Start a fresh conversation from the beginning">➕ New Conversation</button>
+        <button id="gvc-chat-new-conv" class="gvc-chat-btn-sub" title="Start a fresh conversation from the beginning">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <span>New Conversation</span>
+        </button>
         <button id="gvc-chat-clear" class="gvc-chat-btn-sub" title="Clear chat messages (keeps initial video summary)">Clear</button>
         <button id="gvc-chat-close" class="gvc-hdr-btn" style="width:26px;height:26px;font-size:11px;" title="Close Chat">✕</button>
       </div>
     </div>
     <div id="gvc-chat-messages">
       <div class="gvc-chat-msg gvc-chat-msg-system">
-        <span>🎬 <b>Video Context Attached:</b> You can ask follow-up questions about specific timestamps, subjects, dialogue, actions, or visual progression.</span>
+        <span><b>Video Context Attached:</b> You can ask follow-up questions about specific timestamps, subjects, dialogue, actions, or visual progression.</span>
         <button class="gvc-chat-del-btn" style="font-size:11px;margin-left:auto;" title="Dismiss message" onclick="this.closest('.gvc-chat-msg').remove()">✕</button>
       </div>
     </div>
@@ -2675,6 +2833,157 @@ if (box) {
   } else if (box) {
     (document.body || document.documentElement).appendChild(box);
   }
+
+  // ── Universal Keyboard & Textbox Isolation Shield ────────────────────────
+  // Completely isolates all extension inputs and textareas from host page hotkeys (e.g. YouTube, Twitter, Twitch).
+  const setGvcTypingState = (isTyping) => {
+    try {
+      if (isTyping) {
+        document.documentElement.setAttribute('data-gvc-typing', 'true');
+        if (host) host.setAttribute('data-gvc-typing', 'true');
+      } else {
+        document.documentElement.removeAttribute('data-gvc-typing');
+        if (host) host.removeAttribute('data-gvc-typing');
+      }
+    } catch (_) {}
+  };
+
+  const isTextInputElement = (node) => {
+    if (!node) return false;
+    const tag = node.tagName || node.nodeName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+    if (node.isContentEditable) return true;
+    if (typeof node.getAttribute === 'function' && node.getAttribute('role') === 'textbox') return true;
+    return false;
+  };
+
+  const isolateInputKeystrokes = (targetEl) => {
+    if (!targetEl || targetEl.__gvc_isolated__) return;
+    targetEl.__gvc_isolated__ = true;
+
+    targetEl.addEventListener('focus', () => setGvcTypingState(true), true);
+    targetEl.addEventListener('blur', () => {
+      setTimeout(() => {
+        const active = shadowRoot ? shadowRoot.activeElement : null;
+        if (!isTextInputElement(active)) {
+          setGvcTypingState(false);
+        }
+      }, 70);
+    }, true);
+
+    ['keydown', 'keyup', 'keypress'].forEach(evtType => {
+      targetEl.addEventListener(evtType, (e) => {
+        setGvcTypingState(true);
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') {
+          e.stopImmediatePropagation();
+        }
+      }, false);
+    });
+  };
+
+  const isolateAllInputsInTree = (container) => {
+    if (!container || typeof container.querySelectorAll !== 'function') return;
+    const inputs = container.querySelectorAll('input, textarea, [contenteditable]');
+    inputs.forEach(isolateInputKeystrokes);
+  };
+
+  if (box) {
+    // Focus tracking delegation inside HUD
+    box.addEventListener('focusin', (e) => {
+      if (isTextInputElement(e.target)) {
+        setGvcTypingState(true);
+      }
+    }, true);
+
+    box.addEventListener('focusout', (e) => {
+      setTimeout(() => {
+        const active = shadowRoot ? shadowRoot.activeElement : null;
+        if (!isTextInputElement(active)) {
+          setGvcTypingState(false);
+        }
+      }, 70);
+    }, true);
+
+    // Capture phase on box: whenever typing in an input, enforce typing attribute
+    ['keydown', 'keyup', 'keypress'].forEach(evtType => {
+      box.addEventListener(evtType, (e) => {
+        if (isTextInputElement(e.target) || (shadowRoot && isTextInputElement(shadowRoot.activeElement))) {
+          setGvcTypingState(true);
+        }
+      }, true);
+    });
+
+    // Bubble phase on box: completely stop propagation so keystrokes never leave shadow root
+    ['keydown', 'keyup', 'keypress'].forEach(evtType => {
+      box.addEventListener(evtType, (e) => {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') {
+          e.stopImmediatePropagation();
+        }
+      }, false);
+    });
+
+    // Wire up all initially rendered inputs in box
+    isolateAllInputsInTree(box);
+
+    // Observe future dynamic inputs added into box (e.g. YouTube time range, dynamic presets, search)
+    try {
+      const boxObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (m.addedNodes && m.addedNodes.length > 0) {
+            m.addedNodes.forEach(node => {
+              if (node && node.nodeType === 1) {
+                if (isTextInputElement(node)) isolateInputKeystrokes(node);
+                isolateAllInputsInTree(node);
+              }
+            });
+          }
+        }
+      });
+      boxObserver.observe(box, { childList: true, subtree: true });
+    } catch (_) {}
+  }
+
+  if (host) {
+    ['keydown', 'keyup', 'keypress'].forEach(evtType => {
+      host.addEventListener(evtType, (e) => {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') {
+          e.stopImmediatePropagation();
+        }
+      }, false);
+    });
+  }
+
+  ['keydown', 'keyup', 'keypress'].forEach(evtType => {
+    window.addEventListener(evtType, (e) => {
+      const path = e.composedPath ? e.composedPath() : [];
+      let isInsideGvc = false;
+      for (let i = 0; i < path.length; i++) {
+        const node = path[i];
+        if (!node) continue;
+        if (node === host || node === box || node.id === 'gvc-root-container' || node.id === 'gvc-box') {
+          isInsideGvc = true;
+          break;
+        }
+      }
+      if (!isInsideGvc && document.documentElement && document.documentElement.hasAttribute('data-gvc-typing')) {
+        isInsideGvc = true;
+      }
+      if (!isInsideGvc && document.activeElement) {
+        if (document.activeElement === host || document.activeElement.id === 'gvc-root-container' || (document.activeElement.classList && document.activeElement.classList.contains('gvc-vid-badge'))) {
+          isInsideGvc = true;
+        }
+      }
+      if (isInsideGvc) {
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') {
+          e.stopImmediatePropagation();
+        }
+      }
+    }, false);
+  });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -3024,6 +3333,21 @@ async function recordVideoStream(videoEl, durationSec = 30) {
 // ── Click Dispatcher & UI Event Bindings (Top Frame Only) ───────────────────
 if (box) {
   box.addEventListener('click', async (e) => {
+    const tsBtn = (e.target && typeof e.target.closest === 'function') ? e.target.closest('.gvc-ts-link') : null;
+    if (tsBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const sec = parseFloat(tsBtn.dataset.sec);
+      if (!isNaN(sec)) {
+        tsBtn.classList.add('gvc-ts-clicked');
+        setTimeout(() => {
+          try { tsBtn.classList.remove('gvc-ts-clicked'); } catch (_) {}
+        }, 800);
+        seekActiveVideoTo(sec);
+      }
+      return;
+    }
+
     const target = e.target.closest('button, input[type=checkbox], .gvc-res-card');
     if (!target) return;
     const id = target.id;
@@ -3733,7 +4057,12 @@ if (box) {
 
   const chatInput = el('gvc-chat-input');
   if (chatInput) {
+    isolateInputKeystrokes(chatInput);
     chatInput.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') {
+        e.stopImmediatePropagation();
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendChatMessage();
@@ -4120,7 +4449,9 @@ async function renderYouTubeDualModeUI(ytData) {
   display.innerHTML = `
     <div class="gvc-yt-container">
       <div class="gvc-yt-banner">
-        <span class="gvc-yt-icon">▶️</span>
+        <span class="gvc-yt-icon">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        </span>
         <div class="gvc-yt-info">
           <div class="gvc-yt-title" title="${esc(ytData.title)}">${esc(ytData.title)}</div>
           <div class="gvc-yt-meta">${totalDur > 0 ? formatSecondsToTime(totalDur) : 'YouTube Video'} • ${ytData.videoId}</div>
@@ -4129,16 +4460,20 @@ async function renderYouTubeDualModeUI(ytData) {
 
       <div class="gvc-yt-modes">
         <button type="button" class="gvc-yt-mode-tab ${currentYouTubeMode === 1 ? 'active' : ''}" id="gvc-yt-tab-mode1">
-          <span class="gvc-tab-icon">⚡</span>
+          <span class="gvc-tab-icon">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+          </span>
           <div class="gvc-tab-text">
             <span class="gvc-tab-title">Mode 1: Cloud Direct</span>
             <span class="gvc-tab-sub">${isOver3Hours ? '<span style="color:#f87171;">Exceeds 3h • Use Mode 2</span>' : 'Instant • 0 Bandwidth • Max 3h'}</span>
           </div>
         </button>
         <button type="button" class="gvc-yt-mode-tab ${currentYouTubeMode === 2 ? 'active' : ''}" id="gvc-yt-tab-mode2">
-          <span class="gvc-tab-icon">📦</span>
+          <span class="gvc-tab-icon">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="16.5" y1="9.4" x2="7.5" y2="4.21"></line><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+          </span>
           <div class="gvc-tab-text">
-            <span class="gvc-tab-title">Mode 2: Fetch Video ${cached ? (isKeyMatch ? '<span style="color:#00ba7c;font-size:10px;">(⚡ Ready)</span>' : '<span style="color:#8ecdf8;font-size:10px;">(Stored)</span>') : (isOver3Hours ? '<span style="color:#00ba7c;font-size:10px;">(Recommended)</span>' : '')}</span>
+            <span class="gvc-tab-title">Mode 2: Fetch Video ${cached ? (isKeyMatch ? '<span style="color:#00ba7c;font-size:10px;font-weight:700;">(Ready)</span>' : '<span style="color:#8ecdf8;font-size:10px;">(Stored)</span>') : (isOver3Hours ? '<span style="color:#00ba7c;font-size:10px;">(Recommended)</span>' : '')}</span>
             <span class="gvc-tab-sub">${cached ? (isKeyMatch ? 'Ready on Storage' : 'Stored on Cloud • Ready') : (isOver3Hours ? 'Supports 3h+ Videos' : 'Fast • Audio & Video')}</span>
           </div>
         </button>
@@ -4146,7 +4481,10 @@ async function renderYouTubeDualModeUI(ytData) {
 
       <!-- Mode 1: Cloud Direct -->
       <div id="gvc-yt-mode1-panel" class="gvc-yt-panel" style="display:${currentYouTubeMode === 1 ? 'flex' : 'none'};">
-        <div class="gvc-yt-section-title">⏱️ Time Range (Max 3 Hours)</div>
+        <div class="gvc-yt-section-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:4px;"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          Time Range (Max 3 Hours)
+        </div>
         <div class="gvc-yt-offsets">
           <div class="gvc-yt-offset-field">
             <label for="gvc-yt-start">Start Time:</label>
@@ -4159,10 +4497,10 @@ async function renderYouTubeDualModeUI(ytData) {
         </div>
 
         <div class="gvc-yt-quick-buttons">
-          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-from-start" title="Start from beginning of video (00:00:00)">⏮️ From Beginning</button>
-          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-from-current" title="Start from current video player time">⏱️ From Current (${formatSecondsToTime(currTime)})</button>
-          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-first-30m">⚡ First 30 Min</button>
-          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-first-2h">🎬 First 2 Hours</button>
+          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-from-start" title="Start from beginning of video (00:00:00)">From Beginning</button>
+          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-from-current" title="Start from current video player time">From Current (${formatSecondsToTime(currTime)})</button>
+          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-first-30m">First 30 Min</button>
+          <button type="button" class="gvc-yt-quick-btn" id="gvc-yt-first-2h">First 2 Hours</button>
         </div>
 
         <div id="gvc-yt-limit-warning" class="gvc-yt-warning" style="display:${isOver3Hours ? 'block' : 'none'};">
@@ -4173,14 +4511,14 @@ async function renderYouTubeDualModeUI(ytData) {
         </div>
 
         <div class="gvc-yt-cloud-note">
-          💡 <b>Cloud Direct Limit (Google Gemini API):</b> Strictly capped at <b>3 hours (180 minutes / 10,800 frames)</b> total video length. Google validates and rejects videos over 3 hours before applying offsets. Requires public, non-livestream YouTube videos. 0 download bandwidth.
+          <b>Cloud Direct Limit (Google Gemini API):</b> Strictly capped at <b>3 hours (180 minutes / 10,800 frames)</b> total video length. Google validates and rejects videos over 3 hours before applying offsets. Requires public, non-livestream YouTube videos. 0 download bandwidth.
         </div>
       </div>
 
       <!-- Mode 2: Local Fetch & Storage Selection -->
       <div id="gvc-yt-mode2-panel" class="gvc-yt-panel" style="display:${currentYouTubeMode === 2 ? 'flex' : 'none'};">
         ${cached ? `
-          <div class="gvc-yt-section-title" style="margin-bottom:6px;">⚡ Choose Media Source:</div>
+          <div class="gvc-yt-section-title" style="margin-bottom:6px;">Choose Media Source:</div>
 
           <!-- Section 1: Use Video Already Uploaded -->
           <div class="gvc-mode2-card ${currentMode2Source === 'cached' ? 'active-cached' : ''}" id="gvc-card-source-cached">
@@ -5777,6 +6115,10 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         }
       }
 
+      if (saved.summaryJson && saved.summaryJson.usageMetadata) {
+        renderTokenUsage(saved.summaryJson.usageMetadata);
+      }
+
       const btnCont = el('gvc-btn-continue');
       if (btnCont) btnCont.style.display = 'inline-flex';
     }
@@ -5852,6 +6194,10 @@ async function startNewConversation() {
   currentPendingUserQuery = '';
   currentPendingRetryModelId = null;
 
+  if (initialSummaryJson && initialSummaryJson.usageMetadata) {
+    renderTokenUsage(initialSummaryJson.usageMetadata);
+  }
+
   const key = getCurrentVideoStorageKey();
   if (key) {
     try {
@@ -5918,6 +6264,7 @@ async function openChatPane() {
 function closeChatPane() {
   if (!box) return;
   box.classList.remove('gvc-chat-open');
+  setGvcTypingState(false);
   const btnCont = el('gvc-btn-continue');
   if (btnCont) {
     const count = chatHistory.filter(m => m.role === 'user').length;
@@ -5981,6 +6328,11 @@ function appendChatMessage(role, text, options = {}) {
 
     if (options.cachedTokens && options.cachedTokens > 0) {
       metaLeft += `<span class="gvc-chat-cache-tag" title="Google Gemini Prompt Cache Hit">⚡ ${options.cachedTokens.toLocaleString()} tokens cached (free)</span>`;
+    }
+    if (options.usage && options.usage.candidatesTokenCount) {
+      const outCount = Number(options.usage.candidatesTokenCount).toLocaleString();
+      const totCount = options.usage.totalTokenCount ? Number(options.usage.totalTokenCount).toLocaleString() : '';
+      metaLeft += `<span class="gvc-chat-cache-tag" style="color:#71767b;border-color:rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);" title="Tokens for this turn: ${outCount} output / ${totCount} total">💬 ${outCount} tokens</span>`;
     }
 
     const metaLeftSpan = document.createElement('div');
@@ -7490,13 +7842,34 @@ const knownShadowHosts = new Set();
 function findAllVideos() {
   const videos = Array.from(document.querySelectorAll('video'));
   for (const host of knownShadowHosts) {
-    if (host.shadowRoot) {
+    if (host && host.shadowRoot) {
       try {
         const sv = host.shadowRoot.querySelectorAll('video');
         if (sv.length) videos.push(...sv);
       } catch (_) {}
     }
   }
+
+  // Deep scan for all open shadow roots across document
+  try {
+    const scanShadows = (root) => {
+      if (!root) return;
+      try {
+        const all = root.querySelectorAll('*');
+        for (let i = 0; i < all.length; i++) {
+          const node = all[i];
+          if (node && node.shadowRoot) {
+            knownShadowHosts.add(node);
+            const sv = node.shadowRoot.querySelectorAll('video');
+            if (sv.length) videos.push(...sv);
+            scanShadows(node.shadowRoot);
+          }
+        }
+      } catch (_) {}
+    };
+    scanShadows(document.body || document.documentElement);
+  } catch (_) {}
+
   const iframes = document.querySelectorAll('iframe');
   for (const f of iframes) {
     try {
@@ -7506,10 +7879,17 @@ function findAllVideos() {
       }
     } catch (_) {}
   }
-  return videos;
+  return Array.from(new Set(videos));
 }
 
 function findActiveVideo() {
+  if (lastTargetVideoEl && lastTargetVideoEl.isConnected) {
+    return lastTargetVideoEl;
+  }
+  if (lastContextVideo && lastContextVideo.isConnected) {
+    return lastContextVideo;
+  }
+
   // 1. On Twitter: if on status page (/status/\d+), prioritize the video for this specific tweet
   if (isTwitter) {
     const statusMatch = window.location.pathname.match(/status\/(\d+)/);
@@ -7976,6 +8356,21 @@ document.addEventListener('contextmenu', (e) => {
 try {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (teardownIfOrphaned()) return;
+
+  if (msg && msg.type === 'GVC_RELAY_SEEK') {
+    const sec = parseFloat(msg.seconds);
+    if (!isNaN(sec) && sec >= 0) {
+      let vf = (lastTargetVideoEl && lastTargetVideoEl.isConnected) ? lastTargetVideoEl : null;
+      if (!vf) vf = (lastContextVideo && lastContextVideo.isConnected) ? lastContextVideo : null;
+      if (!vf) vf = findActiveVideo();
+      if (vf) {
+        applySeekToVideoElement(vf, sec);
+      }
+      window.postMessage({ type: 'GVC_SEEK_PLAYER', seconds: sec }, '*');
+    }
+    return;
+  }
+
   if (msg.type === 'TOGGLE_VIDEO_BADGES') {
     S.gic_v_show_video_badge = !!msg.enabled;
     if (el('gvc-v-show-badge')) {

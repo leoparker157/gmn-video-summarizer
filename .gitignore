@@ -1,7 +1,7 @@
 # Developer & AI Agent Configurations (Developer-only access)
 .agents/
-AGENTS.md
-GEMINI.md
+AGENTS.md*
+GEMINI.md*
 .gemini/
 .claude/
 apply_icon.py

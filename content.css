@@ -17,14 +17,14 @@
   color: #e7e9ea;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   z-index: 2147483647;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.88), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.94), inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.04);
   display: none;
   overflow: hidden;
   flex-direction: column;
   pointer-events: auto !important;
   box-sizing: border-box;
   resize: both;
-  transition: width 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 #gvc-box.gvc-chat-open {
@@ -52,6 +52,7 @@
   cursor: grab;
   user-select: none;
   touch-action: none;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 #gvc-header:active, #gvc-box.gvc-dragging #gvc-header {
@@ -59,7 +60,7 @@
 }
 
 #gvc-box.gvc-dragging {
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(29, 155, 240, 0.3) !important;
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.98), inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 0 1px rgba(29, 155, 240, 0.35) !important;
   user-select: none !important;
 }
 
@@ -67,6 +68,28 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.gvc-logo-badge {
+  width: 24px;
+  height: 24px;
+  background: #111417;
+  border: 1px solid #2f3336;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #1d9bf0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.gvc-ts-glyph {
+  display: inline-flex;
+  font-size: 8px;
+  margin-right: 4px;
+  color: inherit;
+  opacity: 0.85;
 }
 
 #gvc-title {
@@ -95,7 +118,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all .2s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   pointer-events: auto !important;
   font-family: inherit;
   line-height: 1;
@@ -105,6 +128,10 @@
   background: rgba(239, 243, 244, 0.1);
   color: #eff3f4;
   border-color: #536471;
+}
+
+.gvc-hdr-btn:active {
+  transform: scale(0.92);
 }
 
 #gvc-close-btn:hover {
@@ -153,6 +180,7 @@
   border-radius: 12px;
   padding: 10px 12px;
   margin-bottom: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .gvc-preset-controls {
@@ -173,7 +201,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all .2s;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   flex-shrink: 0;
 }
 
@@ -181,6 +210,10 @@
   background: #202327;
   border-color: #536471;
   color: #fff;
+}
+
+.gvc-btn-icon:active {
+  transform: scale(0.95);
 }
 
 .gvc-btn-sub {
@@ -192,7 +225,8 @@
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all .2s;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   font-family: inherit;
 }
 
@@ -200,6 +234,10 @@
   background: #202327;
   color: #e7e9ea;
   border-color: #536471;
+}
+
+.gvc-btn-sub:active {
+  transform: scale(0.96);
 }
 
 /* Primary Action Buttons */
@@ -214,15 +252,22 @@
   font-weight: 800;
   cursor: pointer;
   margin-top: 12px;
-  transition: all .2s cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
   font-family: inherit;
   box-sizing: border-box;
   letter-spacing: 0.1px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
 #gvc-send:hover:not(:disabled) {
-  background: #d7dbdc;
+  background: #ffffff;
+  box-shadow: 0 3px 10px rgba(255, 255, 255, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.6);
   transform: translateY(-1px);
+}
+
+#gvc-send:active:not(:disabled) {
+  transform: scale(0.985);
+  background: #d7dbdc;
 }
 
 #gvc-send:disabled {
@@ -231,6 +276,7 @@
   opacity: 0.6;
   cursor: not-allowed;
   transform: none;
+  box-shadow: none;
 }
 
 #gvc-cancel {
@@ -244,10 +290,18 @@
   font-weight: 700;
   cursor: pointer;
   margin-top: 8px;
-  transition: all .2s;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   font-family: inherit;
   box-sizing: border-box;
   display: none;
+}
+
+#gvc-cancel:hover {
+  background: rgba(244, 33, 46, 0.22);
+}
+
+#gvc-cancel:active {
+  transform: scale(0.985);
 }
 
 #gvc-cancel:hover {
@@ -541,10 +595,10 @@
   top: 12px !important;
   right: 12px !important;
   z-index: 2147483647 !important;
-  background: rgba(0, 0, 0, 0.88) !important;
-  backdrop-filter: blur(10px) !important;
-  -webkit-backdrop-filter: blur(10px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.25) !important;
+  background: rgba(0, 0, 0, 0.9) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.22) !important;
   border-radius: 9999px !important;
   color: #eff3f4 !important;
   font-size: 11px !important;
@@ -554,8 +608,8 @@
   justify-content: center !important;
   padding: 0 !important;
   white-space: nowrap !important;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.85) !important;
-  transition: all .2s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.88), inset 0 1px 0 rgba(255, 255, 255, 0.14) !important;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
   pointer-events: auto !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
   user-select: none !important;
@@ -564,7 +618,7 @@
 
 .gvc-vid-badge:hover {
   border-color: rgba(255, 255, 255, 0.45) !important;
-  box-shadow: 0 4px 22px rgba(0, 0, 0, 0.95) !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
 }
 
 .gvc-badge-main {
@@ -573,13 +627,17 @@
   gap: 6px !important;
   padding: 6px 10px 6px 14px !important;
   cursor: pointer !important;
-  transition: all .15s ease !important;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1) !important;
   color: #eff3f4 !important;
 }
 
 .gvc-badge-main:hover {
   background: rgba(29, 155, 240, 0.35) !important;
   color: #ffffff !important;
+}
+
+.gvc-badge-main:active {
+  transform: scale(0.97) !important;
 }
 
 .gvc-badge-close {
@@ -592,13 +650,17 @@
   font-weight: 700 !important;
   color: #8899a6 !important;
   border-left: 1px solid rgba(255, 255, 255, 0.18) !important;
-  transition: all .15s ease !important;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1) !important;
   line-height: 1 !important;
 }
 
 .gvc-badge-close:hover {
   background: rgba(244, 33, 46, 0.85) !important;
   color: #ffffff !important;
+}
+
+.gvc-badge-close:active {
+  transform: scale(0.92) !important;
 }
 
 .gvc-badge-dot {
@@ -632,9 +694,9 @@
   bottom: 24px !important;
   right: 24px !important;
   z-index: 2147483645 !important;
-  background: rgba(15, 20, 25, 0.92) !important;
-  backdrop-filter: blur(12px) !important;
-  -webkit-backdrop-filter: blur(12px) !important;
+  background: rgba(15, 20, 25, 0.94) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
   border: 1px solid rgba(29, 155, 240, 0.45) !important;
   border-radius: 9999px !important;
   color: #eff3f4 !important;
@@ -645,19 +707,23 @@
   display: none;
   align-items: center !important;
   gap: 8px !important;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.75), 0 0 12px rgba(29, 155, 240, 0.25) !important;
-  transition: all .2s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 0 12px rgba(29, 155, 240, 0.25) !important;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
   user-select: none !important;
   pointer-events: auto !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
 }
 
 #gvc-float-pill:hover {
-  transform: translateY(-2px) scale(1.04) !important;
+  transform: translateY(-2px) scale(1.03) !important;
   background: #1d9bf0 !important;
   color: #ffffff !important;
   border-color: #1d9bf0 !important;
-  box-shadow: 0 8px 28px rgba(29, 155, 240, 0.5) !important;
+  box-shadow: 0 8px 28px rgba(29, 155, 240, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
+}
+
+#gvc-float-pill:active {
+  transform: translateY(0) scale(0.97) !important;
 }
 
 .gvc-pill-dot {
@@ -955,7 +1021,18 @@
 .gvc-token-val {
   color: #1d9bf0;
   font-weight: 700;
-  font-family: monospace, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.3s ease;
+}
+
+.gvc-token-bar.gvc-token-updated {
+  animation: gvc-token-pulse 0.6s ease-out;
+}
+
+@keyframes gvc-token-pulse {
+  0% { background: rgba(29, 155, 240, 0.16); border-color: rgba(29, 155, 240, 0.45); }
+  100% { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.08); }
 }
 
 /* ── Formatted Output Typography ── */
@@ -963,10 +1040,10 @@
 .gvc-h2 { font-size: 14px; font-weight: 700; color: #1d9bf0; margin: 8px 0 4px; }
 .gvc-h3 { font-size: 13px; font-weight: 600; color: #7856ff; margin: 6px 0 2px; }
 .gvc-list-item { margin: 3px 0 3px 6px; line-height: 1.5; color: #e7e9ea; }
-.gvc-list-num { color: #1d9bf0; font-weight: 600; }
+.gvc-list-num { color: #1d9bf0; font-weight: 600; font-variant-numeric: tabular-nums; }
 .gvc-para-gap { height: 8px; }
-.gvc-code-block { background: #16181c; padding: 8px 10px; border-radius: 6px; border: 1px solid #2f3336; overflow-x: auto; font-family: monospace; font-size: 11px; margin: 6px 0; }
-.gvc-inline-code { background: #16181c; padding: 2px 5px; border-radius: 4px; border: 1px solid #2f3336; font-family: monospace; font-size: 11px; color: #1d9bf0; }
+.gvc-code-block { background: #16181c; padding: 8px 10px; border-radius: 6px; border: 1px solid #2f3336; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 11px; margin: 6px 0; }
+.gvc-inline-code { background: #16181c; padding: 2px 5px; border-radius: 4px; border: 1px solid #2f3336; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 11px; color: #1d9bf0; }
 
 /* Interactive Clickable Video Timestamps */
 .gvc-ts-link {
@@ -980,11 +1057,13 @@
   padding: 1px 6px;
   font-size: 11px;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   cursor: pointer;
   vertical-align: middle;
   line-height: 1.5;
-  transition: all 0.15s ease;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   user-select: none;
 }
 .gvc-ts-link:hover {
@@ -992,11 +1071,18 @@
   border-color: #1d9bf0;
   color: #ffffff;
   transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(29, 155, 240, 0.35);
+  box-shadow: 0 2px 8px rgba(29, 155, 240, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 .gvc-ts-link:active {
-  transform: translateY(0);
-  background: rgba(29, 155, 240, 0.18);
+  transform: translateY(0) scale(0.97);
+  background: rgba(29, 155, 240, 0.2);
+}
+.gvc-ts-link.gvc-ts-clicked {
+  background: rgba(0, 186, 124, 0.25) !important;
+  border-color: #00ba7c !important;
+  color: #00ba7c !important;
+  transform: scale(0.96) !important;
+  box-shadow: 0 0 10px rgba(0, 186, 124, 0.4) !important;
 }
 
 /* ── Stream Prober & Refetch Spinner ── */
@@ -1220,7 +1306,7 @@
   font-size: 13px;
   line-height: 1.4;
   word-break: break-word;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 2px 8px rgba(29, 155, 240, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
 .gvc-chat-msg-model {
@@ -1229,14 +1315,15 @@
 }
 
 .gvc-chat-msg-model .gvc-chat-bubble {
-  background: #16181c;
-  border: 1px solid #2f3336;
+  background: #111417;
+  border: 1px solid #272b30;
   border-radius: 16px 16px 16px 4px;
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.45;
   color: #eff3f4;
   word-break: break-word;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .gvc-chat-msg-system {
@@ -1250,6 +1337,7 @@
   padding: 7px 10px;
   line-height: 1.35;
   box-sizing: border-box;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .gvc-chat-msg-meta {
@@ -1683,7 +1771,8 @@
   align-items: flex-start;
   gap: 8px;
   text-align: left;
-  transition: all 0.2s ease;
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   font-family: inherit;
 }
 
@@ -1692,10 +1781,14 @@
   border-color: #444950;
 }
 
+.gvc-yt-mode-tab:active {
+  transform: scale(0.985);
+}
+
 .gvc-yt-mode-tab.active {
   background: rgba(29, 155, 240, 0.1);
   border-color: #1d9bf0;
-  box-shadow: 0 0 12px rgba(29, 155, 240, 0.15);
+  box-shadow: 0 0 12px rgba(29, 155, 240, 0.15), inset 0 1px 0 rgba(29, 155, 240, 0.25);
 }
 
 .gvc-yt-mode-tab .gvc-tab-icon {
@@ -1964,13 +2057,17 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  transition: all 0.2s;
+  transition: all 0.16s cubic-bezier(0.16, 1, 0.3, 1);
   font-family: inherit;
 }
 
 .gvc-nav-tab:hover {
   color: #eff3f4;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.gvc-nav-tab:active {
+  transform: scale(0.97);
 }
 
 .gvc-nav-tab.active {
@@ -1993,16 +2090,18 @@
   text-align: center;
   line-height: 12px;
   box-shadow: 0 0 0 2px #000;
+  font-variant-numeric: tabular-nums;
 }
 
 .gvc-tab-count-badge {
-  background: rgba(29, 155, 240, 0.2);
+  background: rgba(29, 155, 240, 0.15);
   color: #1d9bf0;
   font-size: 10px;
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 9999px;
   border: 1px solid rgba(29, 155, 240, 0.3);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Storage History Panel ────────────────────────────────────────────────── */
@@ -2081,14 +2180,16 @@
 
 .gvc-hist-card {
   background: #111417;
-  border: 1px solid #2f3336;
+  border: 1px solid #272b30;
   border-radius: 10px;
   padding: 12px;
-  transition: border-color 0.2s, transform 0.1s;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: border-color 0.15s, background 0.15s, transform 0.12s;
 }
 
 .gvc-hist-card:hover {
-  border-color: #536471;
+  border-color: #38444d;
+  background: #16191f;
 }
 
 .gvc-hist-card-top {
@@ -2106,6 +2207,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 .gvc-plat-yt { background: rgba(255, 0, 0, 0.15); color: #ff4e45; border: 1px solid rgba(255, 0, 0, 0.3); }
@@ -2118,6 +2220,7 @@
 .gvc-hist-card-time {
   font-size: 10px;
   color: #71767b;
+  font-variant-numeric: tabular-nums;
 }
 
 .gvc-hist-card-title {

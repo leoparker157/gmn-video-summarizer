@@ -51,14 +51,36 @@ A fast, lightweight browser extension that generates AI-powered video summaries,
 
 ---
 
+## 🔑 How to Get a Gemini API Key from Google AI Studio
+
+This extension requires a Google Gemini API key to generate video summaries and interact with the chat assistant. You can get an API key with a free usage tier directly from Google AI Studio:
+
+1. **Visit Google AI Studio**: Go to [Google AI Studio API Keys](https://aistudio.google.com/apikey) (or [aistudio.google.com](https://aistudio.google.com/)).
+2. **Sign In**: Log in using your standard Google account.
+3. **Create API Key**:
+   - Click the **"Create API key"** (or **"Get API key"**) button.
+   - Select **"Create API key in new project"** (fastest setup), or select an existing Google Cloud project from your list.
+4. **Copy Your Key**:
+   - Once generated, click the copy icon next to your new API key (starts with `AIza...`).
+5. **(Optional) Free Tier vs. Paid Tier**:
+   - Google AI Studio provides a generous **Free Tier** (rate-limited requests per minute) that is completely sufficient for personal video summarizing and chat.
+   - If you need higher rate limits or higher daily quotas, you can click **"Set up billing"** in AI Studio to connect a Google Cloud billing account.
+
+> [!NOTE]
+> Keep your API key secure and do not share it publicly. The extension stores your key exclusively in your local browser sandbox (`chrome.storage.local`) and connects directly to Google's official Gemini API endpoints.
+
+---
+
 ## ⚙️ Quick Setup
 
-1. Obtain a Gemini API key from [Google AI Studio](https://aistudio.google.com/).
-2. Open the extension panel by clicking the toolbar icon or the **⚙️ Settings** button.
-3. Paste your Gemini API key and select your preferred Gemini model.
-4. Navigate to any video (YouTube, X/Twitter, or web video player) and:
-   - Click the on-player **"Summarize"** badge, or
-   - Right-click directly on the video player to open the summarizer panel.
+1. **Add Your API Key**:
+   - Click the **GMN Video Summarizer** toolbar icon or click the **⚙️ Settings** button on the in-page floating badge.
+   - Paste your Gemini API key into the API key field and select your preferred Gemini model (e.g., Gemini Flash or Gemini Pro).
+   - Save your settings.
+2. **Summarize Any Video**:
+   - Navigate to any video on YouTube, X (Twitter), or any website with an HTML5 video player.
+   - Click the floating **"Summarize"** badge located on the video player, or right-click the video and select the context menu option.
+   - Enjoy instant summaries, key takeaways, timestamped chapters, and interactive Q&A!
 
 ---
 
