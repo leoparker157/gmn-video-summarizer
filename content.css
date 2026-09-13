@@ -122,12 +122,19 @@
   pointer-events: auto !important;
   font-family: inherit;
   line-height: 1;
+  position: relative;
 }
 
 .gvc-hdr-btn:hover {
   background: rgba(239, 243, 244, 0.1);
   color: #eff3f4;
   border-color: #536471;
+}
+
+.gvc-hdr-btn.active {
+  background: rgba(29, 155, 240, 0.2);
+  color: #1d9bf0;
+  border-color: rgba(29, 155, 240, 0.4);
 }
 
 .gvc-hdr-btn:active {

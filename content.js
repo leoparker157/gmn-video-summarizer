@@ -829,7 +829,11 @@ async function saveToStorageHistory(entry) {
     createdAt: entry.createdAt || now,
     expiresAt: (entry.createdAt || now) + 48 * 3600 * 1000,
     hasSummary: !!entry.hasSummary,
-    summarySnippet: entry.summarySnippet || ''
+    summarySnippet: entry.summarySnippet || '',
+    summaryText: entry.summaryText || (entry.hasSummary ? lastSummaryText : ''),
+    summaryPayload: entry.summaryPayload || lastSummaryPayload || null,
+    summaryJson: entry.summaryJson || lastSummaryJson || null,
+    chatHistory: entry.chatHistory || (Array.isArray(chatHistory) ? chatHistory : [])
   };
 
   // Remove duplicate entries only if same exact resource/URI, or same video AND same API key
@@ -1073,6 +1077,7 @@ function prepareVideoDisplayWithCachedItem(item) {
       candidates: [{ content: { parts: [{ text: lastSummaryText }] } }]
     }, null, 2);
   }
+  ensureContinueChatButtonVisible();
 }
 
 async function loadStorageItem(item) {
@@ -1305,28 +1310,12 @@ function updateActionButtonState(customState = null) {
   }
 
   // 2. Already analyzed: show "Try Again"
-  if (typeof currentYouTubeData !== 'undefined' && currentYouTubeData) {
-    if (currentYouTubeMode === 1) {
-      if (hasAnalyzedCurrentVideo && lastAnalyzedMode === 1) {
-        elSend.disabled = false;
-        elSend.innerText = '🔄 Try Again';
-        return;
-      }
-    } else {
-      // Mode 2:
-      if (hasAnalyzedCurrentVideo && lastAnalyzedMode === 2 && (sessionId || currentGoogleFileUri)) {
-        elSend.disabled = false;
-        elSend.innerText = '🔄 Try Again';
-        return;
-      }
-    }
-  } else {
-    // Generic video stream:
-    if (hasAnalyzedCurrentVideo) {
-      elSend.disabled = false;
-      elSend.innerText = '🔄 Try Again';
-      return;
-    }
+  const outEl = el('gvc-out');
+  const hasOutSummary = Boolean((lastSummaryText && lastSummaryText.trim().length > 15) || (outEl && outEl.innerText && outEl.innerText.trim().length > 15));
+  if (hasAnalyzedCurrentVideo || hasOutSummary) {
+    elSend.disabled = false;
+    elSend.innerText = '🔄 Try Again';
+    return;
   }
 
   // 3. YouTube Mode 1 (Cloud Direct)
@@ -1957,6 +1946,9 @@ function renderTokenUsage(usage) {
           if (item) {
             item.hasSummary = true;
             item.summarySnippet = rawTextResult.slice(0, 160).replace(/\n+/g, ' ');
+            item.summaryText = rawTextResult;
+            item.summaryJson = j;
+            item.summaryPayload = lastSummaryPayload;
             store.set({ gvc_storage_history: hist });
           }
         });
@@ -1975,7 +1967,9 @@ function renderTokenUsage(usage) {
           apiKeyLast4: getActiveApiKeyLast4(),
           apiKeyMasked: '••••' + getActiveApiKeyLast4(),
           hasSummary: true,
-          summarySnippet: rawTextResult.slice(0, 160).replace(/\n+/g, ' ')
+          summarySnippet: rawTextResult.slice(0, 160).replace(/\n+/g, ' '),
+          summaryText: rawTextResult,
+          summaryJson: j
         });
       } else if (j.promptFeedback && j.promptFeedback.blockReason) {
         const blk = j.promptFeedback.blockReason;
@@ -2007,13 +2001,7 @@ function renderTokenUsage(usage) {
       if (rawTextResult) {
         lastSummaryText = rawTextResult;
         lastSummaryPayload = buildPayload((currentYouTubeMode === 1 && currentYouTubeData) ? currentYouTubeData.canonicalUrl : (currentGoogleFileUri || '__GVC_URI__'));
-        const btnCont = el('gvc-btn-continue');
-        if (btnCont) {
-          btnCont.style.display = 'inline-flex';
-          btnCont.textContent = '💬 Continue Chat';
-        }
-        const btnNew = el('gvc-btn-new-chat');
-        if (btnNew) btnNew.style.display = 'none';
+        ensureContinueChatButtonVisible();
         if (!chatHistory || chatHistory.length === 0) {
           chatHistory = [];
           if (box && box.classList.contains('gvc-chat-open')) {
@@ -2142,14 +2130,7 @@ function renderTokenUsage(usage) {
         currentPendingUserMsgId = null;
         currentPendingUserQuery = '';
         saveCurrentChatLog();
-
-        const btnNew = el('gvc-btn-new-chat');
-        if (btnNew) btnNew.style.display = 'inline-flex';
-        const btnCont = el('gvc-btn-continue');
-        if (btnCont && !box.classList.contains('gvc-chat-open')) {
-          const userCount = chatHistory.filter(m => m.role === 'user').length;
-          btnCont.textContent = userCount > 0 ? `💬 Continue Chat (${userCount})` : '💬 Continue Chat';
-        }
+        ensureContinueChatButtonVisible();
       }
 
       const chatBadgeEl = el('gvc-chat-badge');
@@ -2518,6 +2499,12 @@ if (box) {
       <span id="gvc-title">Universal Video Summarizer</span>
     </div>
     <div id="gvc-header-btns">
+      <button class="gvc-hdr-btn" id="gvc-chat-hdr-btn" title="AI Video Chat (Toggle)" style="display:none;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+        <span id="gvc-chat-hdr-badge" class="gvc-hdr-badge" style="display:none;">0</span>
+      </button>
       <button class="gvc-hdr-btn" id="gvc-history-btn" title="Uploaded Storage History">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="10"></circle>
@@ -3615,7 +3602,7 @@ if (box) {
     }
 
     // Video Chat Controls
-    if (id === 'gvc-btn-continue') {
+    if (id === 'gvc-btn-continue' || id === 'gvc-chat-hdr-btn' || (target && target.closest && target.closest('#gvc-chat-hdr-btn'))) {
       if (box.classList.contains('gvc-chat-open')) {
         closeChatPane();
       } else {
@@ -4796,6 +4783,7 @@ async function renderYouTubeDualModeUI(ytData) {
   if (lastSummaryText && elOut) {
     elOut.innerHTML = formatResponseHTML(lastSummaryText);
   }
+  ensureContinueChatButtonVisible();
 
   validateYouTubeRange();
 }
@@ -5082,6 +5070,7 @@ async function renderResolutionSelection(rawVariants, postInfo = null, autoStart
   if (lastSummaryText && elOut) {
     elOut.innerHTML = formatResponseHTML(lastSummaryText);
   }
+  ensureContinueChatButtonVisible();
 
   // Asynchronously probe metadata
   variants.forEach(async (v, idx) => {
@@ -5965,7 +5954,13 @@ async function saveCurrentChatLog() {
           || (normalizePageUrl(h.pageUrl) === normalizePageUrl(window.location.href));
         if (match) {
           h.hasSummary = !!lastSummaryText;
-          if (lastSummaryText) h.summarySnippet = lastSummaryText.slice(0, 160);
+          if (lastSummaryText) {
+            h.summaryText = lastSummaryText;
+            h.summarySnippet = lastSummaryText.slice(0, 160);
+            h.summaryJson = lastSummaryJson;
+            h.summaryPayload = lastSummaryPayload;
+          }
+          h.chatHistory = (Array.isArray(chatHistory) ? chatHistory : []);
           h.hasChat = (chatHistory && chatHistory.length > 0);
           histUpdated = true;
         }
@@ -5975,6 +5970,52 @@ async function saveCurrentChatLog() {
       }
     }
   } catch (_) {}
+}
+
+function ensureContinueChatButtonVisible() {
+  const outEl = el('gvc-out');
+  const summaryString = (lastSummaryText && typeof lastSummaryText === 'string') ? lastSummaryText.trim() : (outEl ? (outEl.innerText || '').trim() : '');
+  const hasSummary = summaryString.length > 15;
+  const userMsgCount = (Array.isArray(chatHistory) ? chatHistory.filter(m => m && m.role === 'user').length : 0);
+  const hasChat = userMsgCount > 0;
+
+  const btnCont = el('gvc-btn-continue');
+  const btnNew = el('gvc-btn-new-chat');
+  const resArea = el('gvc-result-area');
+  const hdrChatBtn = el('gvc-chat-hdr-btn');
+  const hdrChatBadge = el('gvc-chat-hdr-badge');
+
+  if (hasSummary || hasChat) {
+    if (resArea && hasSummary) {
+      resArea.style.display = 'block';
+    }
+    if (btnCont) {
+      btnCont.style.display = 'inline-flex';
+      const labelText = userMsgCount > 0 ? `Continue Chat (${userMsgCount})` : 'Continue Chat';
+      btnCont.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        <span>${labelText}</span>
+      `;
+    }
+    if (btnNew) {
+      btnNew.style.display = userMsgCount > 0 ? 'inline-flex' : 'none';
+    }
+    if (hdrChatBtn) {
+      hdrChatBtn.style.display = 'inline-flex';
+      if (hdrChatBadge) {
+        hdrChatBadge.style.display = userMsgCount > 0 ? 'inline-block' : 'none';
+        hdrChatBadge.textContent = String(userMsgCount);
+      }
+    }
+    hasAnalyzedCurrentVideo = true;
+    updateActionButtonState();
+  } else {
+    // Initial start / video not summarized yet: strictly hidden
+    if (btnCont) btnCont.style.display = 'none';
+    if (btnNew) btnNew.style.display = 'none';
+    if (hdrChatBtn) hdrChatBtn.style.display = 'none';
+    if (hdrChatBadge) hdrChatBadge.style.display = 'none';
+  }
 }
 
 async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
@@ -6013,15 +6054,25 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
       }
     }
 
+    // Storage history fallback: If targetItem has summaryText, restore it directly
+    if (!saved && targetItem && targetItem.summaryText && targetItem.summaryText.trim()) {
+      saved = {
+        summaryText: targetItem.summaryText,
+        summaryPayload: targetItem.summaryPayload || null,
+        summaryJson: targetItem.summaryJson || null,
+        chatHistory: targetItem.chatHistory || [],
+        apiKeyLast4: targetItem.apiKeyLast4 || '',
+        videoId: targetItem.videoId || null,
+        fileUri: targetItem.fileUri || null
+      };
+    }
+
     if (!saved) {
-      if (targetItem) {
+      if (targetItem && !lastSummaryText) {
         chatHistory = [];
         renderChatMessagesFromHistory([]);
-        const btnCont = el('gvc-btn-continue');
-        if (btnCont) btnCont.style.display = 'none';
-        const btnNew = el('gvc-btn-new-chat');
-        if (btnNew) btnNew.style.display = 'none';
       }
+      ensureContinueChatButtonVisible();
       return false;
     }
 
@@ -6073,9 +6124,6 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
       if (saved.summaryJson && saved.summaryJson.usageMetadata) {
         renderTokenUsage(saved.summaryJson.usageMetadata);
       }
-
-      const btnCont = el('gvc-btn-continue');
-      if (btnCont) btnCont.style.display = 'inline-flex';
     }
 
     // 2. Restore real chat history
@@ -6084,15 +6132,6 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
       renderChatMessagesFromHistory(chatHistory);
 
       const userMsgCount = chatHistory.filter(m => m.role === 'user').length;
-      const btnCont = el('gvc-btn-continue');
-      if (btnCont) {
-        btnCont.style.display = 'inline-flex';
-        btnCont.textContent = userMsgCount > 0 ? `💬 Continue Chat (${userMsgCount})` : '💬 Continue Chat';
-      }
-
-      const btnNew = el('gvc-btn-new-chat');
-      if (btnNew) btnNew.style.display = 'inline-flex';
-
       const badgeEl = el('gvc-chat-badge');
       if (badgeEl) {
         badgeEl.textContent = `Continued (${userMsgCount} msgs)`;
@@ -6100,14 +6139,10 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         badgeEl.style.borderColor = 'rgba(29, 155, 240, 0.3)';
         badgeEl.style.background = 'rgba(29, 155, 240, 0.15)';
       }
-
-      return true;
-    } else {
-      const btnNew = el('gvc-btn-new-chat');
-      if (btnNew) btnNew.style.display = 'none';
     }
 
-    return !!saved.summaryText;
+    ensureContinueChatButtonVisible();
+    return !!(saved.summaryText || (saved.chatHistory && saved.chatHistory.length > 0));
   } catch (_) {
     return false;
   }
@@ -6191,6 +6226,7 @@ async function startNewConversation() {
   if (btnCont) btnCont.textContent = '💬 Continue Chat';
   const btnNew = el('gvc-btn-new-chat');
   if (btnNew) btnNew.style.display = 'none';
+  ensureContinueChatButtonVisible();
 
   const chatInput = el('gvc-chat-input');
   if (chatInput) {
@@ -6206,6 +6242,8 @@ async function openChatPane() {
   box.classList.add('gvc-chat-open');
   const btnCont = el('gvc-btn-continue');
   if (btnCont) btnCont.textContent = '💬 Close Chat';
+  const hdrChatBtn = el('gvc-chat-hdr-btn');
+  if (hdrChatBtn) hdrChatBtn.classList.add('active');
   if (chatHistory.length === 0) {
     await restoreSavedChatLogForCurrentVideo();
   }
@@ -6220,11 +6258,9 @@ function closeChatPane() {
   if (!box) return;
   box.classList.remove('gvc-chat-open');
   setGvcTypingState(false);
-  const btnCont = el('gvc-btn-continue');
-  if (btnCont) {
-    const count = chatHistory.filter(m => m.role === 'user').length;
-    btnCont.textContent = count > 0 ? `💬 Continue Chat (${count})` : '💬 Continue Chat';
-  }
+  const hdrChatBtn = el('gvc-chat-hdr-btn');
+  if (hdrChatBtn) hdrChatBtn.classList.remove('active');
+  ensureContinueChatButtonVisible();
 }
 
 function resetChatMessages() {
@@ -8058,6 +8094,7 @@ async function openAndExtract(vEl) {
   if (elOut)  elOut.innerText = '';
   if (elProg) elProg.style.width = '0%';
   if (el('gvc-token-usage')) el('gvc-token-usage').style.display = 'none';
+  ensureContinueChatButtonVisible();
 
   if (port) {
     try { port.disconnect(); } catch (_) {}
@@ -8802,6 +8839,11 @@ initDraggablePanel();
 // ── JWPlayer Quality Live Synchronizer ───────────────────────────────────────
 window.addEventListener('message', (e) => {
   if (e.source !== window || !e.data) return;
+
+  if (e.data.type === 'GVC_RELOAD_EXTENSION') {
+    safeSendMessage({ type: 'RELOAD_EXTENSION' });
+    return;
+  }
 
   if ((e.data.type === 'GVC_YOUTUBE_DATA_AUTO' || e.data.type === 'GVC_YOUTUBE_DATA_RES') && e.data.data) {
     if (box && box.style.display === 'flex' && (!currentYouTubeData || currentYouTubeData.videoId !== e.data.data.videoId || !currentYouTubeData.audioStreams?.length)) {
