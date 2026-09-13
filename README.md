@@ -12,6 +12,8 @@ A fast, lightweight browser extension that generates AI-powered video summaries,
 ## Overview
 
 **GMN Video Summarizer** lets you summarize and chat with videos directly inside your browser without copying links, leaving the page, or relying on external relay servers. It detects video players across YouTube, Twitter/X, and web video platforms, providing instant, structured summaries and multi-turn conversational answers.
+<img width="1773" height="1057" alt="Screenshot 2026-09-11 191908" src="https://github.com/user-attachments/assets/6fe4ee7c-a4ce-46a3-ae4c-9859ee560be4" />
+
 
 ---
 
