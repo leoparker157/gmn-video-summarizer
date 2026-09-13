@@ -31,6 +31,42 @@ A fast, lightweight browser extension that generates AI-powered video summaries,
 
 ---
 
+## 📊 Processing Modes & Technical Limits
+
+GMN Video Summarizer offers two distinct processing architectures tailored for speed, bandwidth efficiency, and broad platform compatibility:
+
+| Specification | Mode 1: Cloud Direct (YouTube) | Mode 2: Universal Fetch & Upload | Real-Time Screen Capture |
+| :--- | :--- | :--- | :--- |
+| **Supported Videos** | Public & unlisted YouTube videos | Any web video (MP4, WebM, HLS, DASH, Twitter/X, embedded players) | DRM/Cloudflare-shielded players, live streams |
+| **Max File Size** | Handled directly by Google servers | **2 GB (2,048 MB)** *(Google Files API limit)* | In-memory stream buffer (~5–50 MB) |
+| **Max Duration** | Up to ~1–2 hours (video) / ~6+ hours (audio) | Up to **~50–60 minutes** per single video upload (~1M tokens at 1 fps) | 15–90s highlights or custom recording |
+| **Local Bandwidth** | **0 MB** (zero download/upload bandwidth) | Full video chunk download & upload | Only captured playback buffer |
+| **Upload Speed** | **Instant** (starts analyzing in <1s) | Dependent on your internet connection & chosen resolution | Instant upon stopping recording |
+| **Gemini File Retention**| Managed by YouTube | **48 Hours** *(cached in local storage to re-analyze with 0 bandwidth)* | **48 Hours** |
+| **Key Requirement** | Publicly accessible URL on YouTube | Direct media URL, HLS playlist (`.m3u8`), or DASH manifest (`.mpd`) | Active playback in the browser tab |
+
+### 🔍 Detailed Mode Breakdown
+
+#### 1. Mode 1: Cloud Direct Mode (YouTube)
+- **How It Works**: Passes the canonical YouTube video URL directly to Google's Gemini infrastructure (`file_data`).
+- **Zero Local Download**: Your computer downloads 0 bytes of video; Google's servers read the video stream directly from YouTube.
+- **Limits**:
+  - Requires public or unlisted YouTube videos (private, age-restricted, or member-only videos cannot be accessed by Google servers).
+  - Subject to Gemini's 1-million token context window (comfortably fits ~60–90 minutes of video with audio).
+
+#### 2. Mode 2: Universal Fetch & Upload (Google Files API)
+- **How It Works**: The extension's adaptive downloader fetches video chunks (HLS `.m3u8`, MPEG-TS, DASH `.mpd`, or raw MP4) in the background, transmuxes them into a clean playable container via `mux.js`, and uploads it to Google Gemini Files API.
+- **Limits**:
+  - **Maximum File Size: 2 GB (2,048 MB)**: Strictly enforced by the Google Gemini Files API. If a long 1080p stream exceeds 2 GB, select a 720p or 480p resolution pill in the extension panel.
+  - **Maximum Video Length**: Gemini samples video at **1 frame per second (1 fps)**, consuming ~258–300 tokens per second. A standard 1M-token model (e.g., Gemini 2.5 Flash) can ingest up to **~50–60 minutes** of full video + audio per analysis.
+  - **48-Hour File Reuse**: Google Files API preserves uploaded files for 48 hours. The extension automatically caches the `file_uri`, so asking follow-up questions or re-analyzing the video consumes **zero additional upload bandwidth**.
+
+#### 3. Real-Time Screen / Player Capture (`🔴 Capture Screen`)
+- **How It Works**: Captures the decrypted video and audio stream directly from the active HTML5 player element using `captureStream()`.
+- **When to Use**: Designed as a reliable fallback for streams protected by custom DRM shields (e.g. `SAMPLE-AES`, `urn:avs:shield`) or Cloudflare Turnstile barriers where raw chunk downloads are restricted.
+
+---
+
 ## 🚀 Installation
 
 ### Load Unpacked in Chrome or Edge
