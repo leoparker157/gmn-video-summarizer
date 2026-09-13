@@ -2466,6 +2466,60 @@ const box = isTopFrame ? document.createElement('div') : null;
 const show = (v) => v ? 'block' : 'none';
 const chk  = (v) => v ? 'checked' : '';
 
+// ── Universal Keyboard & Textbox Isolation Shield (Module-level Scope) ─────
+// Completely isolates all extension inputs and textareas from host page hotkeys (e.g. YouTube, Twitter, Twitch).
+const setGvcTypingState = (isTyping) => {
+  try {
+    if (isTyping) {
+      document.documentElement.setAttribute('data-gvc-typing', 'true');
+      if (host) host.setAttribute('data-gvc-typing', 'true');
+    } else {
+      document.documentElement.removeAttribute('data-gvc-typing');
+      if (host) host.removeAttribute('data-gvc-typing');
+    }
+  } catch (_) {}
+};
+
+const isTextInputElement = (node) => {
+  if (!node) return false;
+  const tag = node.tagName || node.nodeName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+  if (node.isContentEditable) return true;
+  if (typeof node.getAttribute === 'function' && node.getAttribute('role') === 'textbox') return true;
+  return false;
+};
+
+const isolateInputKeystrokes = (targetEl) => {
+  if (!targetEl || targetEl.__gvc_isolated__) return;
+  targetEl.__gvc_isolated__ = true;
+
+  targetEl.addEventListener('focus', () => setGvcTypingState(true), true);
+  targetEl.addEventListener('blur', () => {
+    setTimeout(() => {
+      const active = shadowRoot ? shadowRoot.activeElement : null;
+      if (!isTextInputElement(active)) {
+        setGvcTypingState(false);
+      }
+    }, 70);
+  }, true);
+
+  ['keydown', 'keyup', 'keypress'].forEach(evtType => {
+    targetEl.addEventListener(evtType, (e) => {
+      setGvcTypingState(true);
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') {
+        e.stopImmediatePropagation();
+      }
+    }, false);
+  });
+};
+
+const isolateAllInputsInTree = (container) => {
+  if (!container || typeof container.querySelectorAll !== 'function') return;
+  const inputs = container.querySelectorAll('input, textarea, [contenteditable]');
+  inputs.forEach(isolateInputKeystrokes);
+};
+
 if (box) {
   box.id = 'gvc-box';
   box.style.display = 'none';
@@ -2833,60 +2887,6 @@ if (box) {
   } else if (box) {
     (document.body || document.documentElement).appendChild(box);
   }
-
-  // ── Universal Keyboard & Textbox Isolation Shield ────────────────────────
-  // Completely isolates all extension inputs and textareas from host page hotkeys (e.g. YouTube, Twitter, Twitch).
-  const setGvcTypingState = (isTyping) => {
-    try {
-      if (isTyping) {
-        document.documentElement.setAttribute('data-gvc-typing', 'true');
-        if (host) host.setAttribute('data-gvc-typing', 'true');
-      } else {
-        document.documentElement.removeAttribute('data-gvc-typing');
-        if (host) host.removeAttribute('data-gvc-typing');
-      }
-    } catch (_) {}
-  };
-
-  const isTextInputElement = (node) => {
-    if (!node) return false;
-    const tag = node.tagName || node.nodeName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
-    if (node.isContentEditable) return true;
-    if (typeof node.getAttribute === 'function' && node.getAttribute('role') === 'textbox') return true;
-    return false;
-  };
-
-  const isolateInputKeystrokes = (targetEl) => {
-    if (!targetEl || targetEl.__gvc_isolated__) return;
-    targetEl.__gvc_isolated__ = true;
-
-    targetEl.addEventListener('focus', () => setGvcTypingState(true), true);
-    targetEl.addEventListener('blur', () => {
-      setTimeout(() => {
-        const active = shadowRoot ? shadowRoot.activeElement : null;
-        if (!isTextInputElement(active)) {
-          setGvcTypingState(false);
-        }
-      }, 70);
-    }, true);
-
-    ['keydown', 'keyup', 'keypress'].forEach(evtType => {
-      targetEl.addEventListener(evtType, (e) => {
-        setGvcTypingState(true);
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === 'function') {
-          e.stopImmediatePropagation();
-        }
-      }, false);
-    });
-  };
-
-  const isolateAllInputsInTree = (container) => {
-    if (!container || typeof container.querySelectorAll !== 'function') return;
-    const inputs = container.querySelectorAll('input, textarea, [contenteditable]');
-    inputs.forEach(isolateInputKeystrokes);
-  };
 
   if (box) {
     // Focus tracking delegation inside HUD
