@@ -484,7 +484,7 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 // ── Stream Metadata Prober (HEAD request & HLS Manifest Inspector) ────────────
-async function probeStreamMetadata(url) {
+async function probeStreamMetadata(url, tabId = null, refererUrl = null) {
   try {
     if (!url || typeof url !== 'string') return { url, error: 'Invalid URL' };
     const cleanUrl = cleanMediaUrl(url);
@@ -492,7 +492,10 @@ async function probeStreamMetadata(url) {
     // 1. If HLS (.m3u8), parse manifest text to extract resolutions, segments, duration, and estimated size
     if (isHlsStreamUrl(cleanUrl)) {
       try {
-        const manifest = await parseHlsManifest(cleanUrl);
+        if (refererUrl) {
+          await configureCdnBypassRules([cleanUrl], refererUrl);
+        }
+        const manifest = await parseHlsManifest(cleanUrl, tabId, refererUrl);
         if (manifest.isMaster) {
           const resolutions = manifest.variants.map(v => v.resolution).filter(Boolean);
           const highestBw = manifest.variants[0]?.bandwidth || 0;
@@ -512,7 +515,7 @@ async function probeStreamMetadata(url) {
           let estMB = null;
           if (manifest.segments.length > 0) {
             try {
-              const headRes = await fetch(manifest.segments[0].url, { method: 'HEAD' });
+              const headRes = await fetchWithRetry(manifest.segments[0].url, 1, 3000, refererUrl);
               const segLen = parseInt(headRes.headers.get('Content-Length') || '0', 10);
               if (segLen > 0) {
                 estBytes = segLen * manifest.segments.length;
@@ -536,7 +539,10 @@ async function probeStreamMetadata(url) {
     // 1b. If DASH (.mpd), parse manifest to extract resolutions and tracks
     if (isDashStreamUrl(cleanUrl)) {
       try {
-        const manifest = await parseDashManifest(cleanUrl);
+        if (refererUrl) {
+          await configureCdnBypassRules([cleanUrl], refererUrl);
+        }
+        const manifest = await parseDashManifest(cleanUrl, tabId, refererUrl);
         return {
           url: cleanUrl,
           isDash: true,
@@ -612,7 +618,8 @@ chrome.runtime.onConnect.addListener((port) => {
           : [];
         send({ type: 'SNIFFED_STREAMS_RESULT', streams: tabStreams });
       } else if (msg.type === 'PROBE_METADATA') {
-        const meta = await probeStreamMetadata(msg.url);
+        const effectiveReferer = msg.referer || (tabId != null ? (await getTabUrl(tabId)) : null);
+        const meta = await probeStreamMetadata(msg.url, tabId, effectiveReferer);
         send({ type: 'METADATA_RESULT', url: msg.url, meta });
       } else if (msg.type === 'DOWNLOAD') {
         await handleDownload(msg.url, send, portSessions, tabId, msg.referer, msg.autoUpload, msg.apiKey);
@@ -939,6 +946,13 @@ async function configureCdnBypassRules(targetUrls, refererUrl) {
         { header: 'Origin', operation: 'set', value: effectiveOrigin }
       ];
 
+      const responseHeaders = [
+        { header: 'Access-Control-Allow-Origin', operation: 'set', value: effectiveOrigin || '*' },
+        { header: 'Access-Control-Allow-Credentials', operation: 'set', value: 'true' },
+        { header: 'Access-Control-Allow-Methods', operation: 'set', value: 'GET, HEAD, OPTIONS' },
+        { header: 'Access-Control-Allow-Headers', operation: 'set', value: '*' }
+      ];
+
       const isGoogleVideo = targetHost.includes('googlevideo.com');
       const filter = isGoogleVideo ? '*://*.googlevideo.com/*' : `||${targetHost}/`;
 
@@ -947,7 +961,8 @@ async function configureCdnBypassRules(targetUrls, refererUrl) {
         priority: 1,
         action: {
           type: 'modifyHeaders',
-          requestHeaders: requestHeaders
+          requestHeaders: requestHeaders,
+          responseHeaders: responseHeaders
         },
         condition: {
           urlFilter: filter,
@@ -957,8 +972,8 @@ async function configureCdnBypassRules(targetUrls, refererUrl) {
       ruleId++;
     }
 
-    // Clean up older dynamic rules up to id 1015
-    for (let extra = ruleId; extra < 1015; extra++) {
+    // Clean up older dynamic rules up to id 1025
+    for (let extra = ruleId; extra < 1025; extra++) {
       removeRuleIds.push(extra);
     }
 
@@ -1003,7 +1018,7 @@ async function fetchChunkViaTab(tabId, url) {
 }
 
 // ── Helper: Fetch with Exponential Backoff Retry & 10s Abort Timeout ─────────
-async function fetchWithRetry(url, maxRetries = 3, timeoutMs = 10000) {
+async function fetchWithRetry(url, maxRetries = 3, timeoutMs = 10000, refererUrl = null) {
   let attempt = 0;
   let lastErr = null;
 
@@ -1011,8 +1026,19 @@ async function fetchWithRetry(url, maxRetries = 3, timeoutMs = 10000) {
   const fetchHeaders = {};
   try {
     const u = new URL(url);
-    fetchHeaders['Referer'] = u.origin + '/';
-    fetchHeaders['Origin'] = u.origin;
+    const targetHost = u.hostname;
+    const isSelfReferencingCdn = targetHost.includes('googleapiscdn.com') ||
+                                 targetHost.includes('playhydra') ||
+                                 targetHost.includes('2embed') ||
+                                 targetHost.includes('vidsrc');
+    const effectiveReferer = isSelfReferencingCdn ? `https://${targetHost}/` : (refererUrl || `https://${targetHost}/`);
+    let effectiveOrigin = `https://${targetHost}`;
+    try {
+      effectiveOrigin = (new URL(effectiveReferer)).origin;
+    } catch (_) {}
+
+    fetchHeaders['Referer'] = effectiveReferer;
+    fetchHeaders['Origin'] = effectiveOrigin;
   } catch (_) {}
 
   while (attempt < maxRetries) {
@@ -1078,12 +1104,12 @@ function parseSegmentTemplateAttributes(attrStr) {
 }
 
 // ── Universal DASH MPD Manifest Parser (Pure Regex XML for Service Worker) ────
-async function parseDashManifest(manifestUrl, tabId = null) {
+async function parseDashManifest(manifestUrl, tabId = null, refererUrl = null) {
   const cleanUrl = cleanMediaUrl(manifestUrl);
   let text = '';
   let baseUrl = cleanUrl;
   try {
-    const res = await fetchWithRetry(cleanUrl, 3);
+    const res = await fetchWithRetry(cleanUrl, 3, 10000, refererUrl);
     text = await res.text();
     baseUrl = res.url || cleanUrl;
   } catch (err) {
@@ -1198,13 +1224,14 @@ async function parseDashManifest(manifestUrl, tabId = null) {
 async function handleDashDownload(url, send, portSessions, tabId, refererUrl) {
   startKeepAlive();
   const cleanUrl = cleanMediaUrl(url);
+  const effectiveReferer = refererUrl || (tabId != null ? (await getTabUrl(tabId)) : null);
 
-  if (refererUrl) {
-    await configureCdnBypassRules([cleanUrl], refererUrl);
+  if (effectiveReferer) {
+    await configureCdnBypassRules([cleanUrl], effectiveReferer);
   }
 
   send({ type: 'PROGRESS', message: 'Analyzing DASH MPD manifest...' });
-  const manifest = await parseDashManifest(cleanUrl, tabId);
+  const manifest = await parseDashManifest(cleanUrl, tabId, effectiveReferer);
 
   if (!manifest.videoRepresentations || manifest.videoRepresentations.length === 0) {
     throw new Error('No playable video tracks found in DASH MPD manifest.');
@@ -1247,7 +1274,7 @@ async function handleDashDownload(url, send, portSessions, tabId, refererUrl) {
     const initRel = tmpl.initialization.replace(/\$RepresentationID\$/g, videoRep.id);
     const initUrl = new URL(initRel, manifest.baseUrl).toString();
     try {
-      const initRes = await fetchWithRetry(initUrl, 3);
+      const initRes = await fetchWithRetry(initUrl, 3, 10000, effectiveReferer);
       initBuffer = await initRes.arrayBuffer();
     } catch (_) {}
   }
@@ -1292,7 +1319,7 @@ async function handleDashDownload(url, send, portSessions, tabId, refererUrl) {
       let isRateLimited = false;
 
       try {
-        const chunkRes = await fetchWithRetry(seg.url, 2, 12000);
+        const chunkRes = await fetchWithRetry(seg.url, 2, 12000, effectiveReferer);
         chunkBuffer = await chunkRes.arrayBuffer();
       } catch (fetchErr) {
         if (fetchErr && fetchErr.status === 429) isRateLimited = true;
@@ -1395,12 +1422,12 @@ function getSegmentIv(keyInfo, seqIndex) {
 }
 
 // ── Decrypt AES-128 HLS Segment using Web Crypto API ──────────────────────────
-async function decryptChunk(encryptedBuffer, keyInfo, seqIndex, tabId = null) {
+async function decryptChunk(encryptedBuffer, keyInfo, seqIndex, tabId = null, refererUrl = null) {
   let cryptoKey = HLS_KEY_CACHE.get(keyInfo.keyUri);
   if (!cryptoKey) {
     let keyRaw = null;
     try {
-      const keyRes = await fetchWithRetry(keyInfo.keyUri, 3);
+      const keyRes = await fetchWithRetry(keyInfo.keyUri, 3, 10000, refererUrl);
       keyRaw = await keyRes.arrayBuffer();
     } catch (keyErr) {
       if (tabId != null) {
@@ -1495,12 +1522,12 @@ function cleanTsChunk(buffer) {
 }
 
 // ── High-Performance HLS Manifest Parser (Master & Media Playlists) ───────────
-async function parseHlsManifest(manifestUrl, tabId = null) {
+async function parseHlsManifest(manifestUrl, tabId = null, refererUrl = null) {
   const cleanUrl = cleanMediaUrl(manifestUrl);
   let text = '';
   let baseUrl = cleanUrl;
   try {
-    const res = await fetchWithRetry(cleanUrl, 3);
+    const res = await fetchWithRetry(cleanUrl, 3, 10000, refererUrl);
     text = await res.text();
     baseUrl = res.url || cleanUrl; // Use final redirected URL for relative segment paths
   } catch (err) {
@@ -1671,9 +1698,10 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
   startKeepAlive();
 
   const cleanUrl = cleanMediaUrl(url);
+  const effectiveReferer = refererUrl || (tabId != null ? (await getTabUrl(tabId)) : null);
 
-  if (refererUrl) {
-    await configureCdnBypassRules([cleanUrl], refererUrl);
+  if (effectiveReferer) {
+    await configureCdnBypassRules([cleanUrl], effectiveReferer);
   }
 
   // If already completed and cached in memory, return immediately!
@@ -1687,7 +1715,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
 
   send({ type: 'PROGRESS', message: 'Analyzing HLS / MPEG-TS stream playlist...' });
 
-  let manifest = (session && session.manifest) ? session.manifest : await parseHlsManifest(url, tabId);
+  let manifest = (session && session.manifest) ? session.manifest : await parseHlsManifest(url, tabId, effectiveReferer);
 
   if (manifest.isMaster) {
     if (!manifest.variants || manifest.variants.length === 0) {
@@ -1698,7 +1726,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       type: 'PROGRESS',
       message: `Found ${manifest.variants.length} quality variants. Selected ${selectedVariant.label || 'highest'} quality...`
     });
-    manifest = await parseHlsManifest(selectedVariant.url, tabId);
+    manifest = await parseHlsManifest(selectedVariant.url, tabId, effectiveReferer);
   }
 
   if (manifest.isEncryptedDrm) {
@@ -1729,7 +1757,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       targetUrlsForDnr.push(segmentsToDownload[segmentsToDownload.length - 1].url);
     }
   }
-  await configureCdnBypassRules(targetUrlsForDnr, refererUrl);
+  await configureCdnBypassRules(targetUrlsForDnr, effectiveReferer);
 
   // Initialize or attach to existing session
   if (!session || session.totalSegments !== totalSegments) {
@@ -1835,7 +1863,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       let isRateLimited = false;
 
       try {
-        const chunkRes = await fetchWithRetry(seg.url, 2, 12000);
+        const chunkRes = await fetchWithRetry(seg.url, 2, 12000, effectiveReferer);
         chunkBuffer = await chunkRes.arrayBuffer();
       } catch (fetchErr) {
         if (fetchErr && fetchErr.status === 429) {
@@ -1868,7 +1896,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       // Decrypt AES-128 chunks (works whether fetched directly or via tab session)
       if (chunkBuffer && seg.key && seg.key.method === 'AES-128') {
         try {
-          chunkBuffer = await decryptChunk(chunkBuffer, seg.key, seg.seqIndex, tabId);
+          chunkBuffer = await decryptChunk(chunkBuffer, seg.key, seg.seqIndex, tabId, effectiveReferer);
         } catch (decErr) {
           console.warn(`[GVC HLS] Failed to decrypt segment #${idx + 1}:`, decErr);
           chunkBuffer = null;
@@ -2237,17 +2265,18 @@ async function handleIngestBlob(msg, send, portSessions, senderTabId) {
 // ── Download Direct Streams (Normalized Full File from Byte 0) ────────────────
 async function handleDownload(url, send, portSessions, tabId, refererUrl, autoUpload, apiKey) {
   const cleanUrl = cleanMediaUrl(url);
+  const effectiveReferer = refererUrl || (tabId != null ? (await getTabUrl(tabId)) : null);
 
-  if (refererUrl) {
-    await configureCdnBypassRules(cleanUrl, refererUrl);
+  if (effectiveReferer) {
+    await configureCdnBypassRules(cleanUrl, effectiveReferer);
   }
 
   if (isHlsStreamUrl(cleanUrl)) {
-    return await handleHlsDownload(cleanUrl, send, portSessions, tabId, refererUrl);
+    return await handleHlsDownload(cleanUrl, send, portSessions, tabId, effectiveReferer);
   }
 
   if (isDashStreamUrl(cleanUrl)) {
-    return await handleDashDownload(cleanUrl, send, portSessions, tabId, refererUrl);
+    return await handleDashDownload(cleanUrl, send, portSessions, tabId, effectiveReferer);
   }
 
   // Check if URL is a TS or M4S chunk
@@ -2259,7 +2288,7 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl, autoUp
     const probedM3u8 = await probeManifestFromTsUrl(cleanUrl);
     if (probedM3u8) {
       send({ type: 'PROGRESS', message: 'Found complete HLS playlist! Downloading all video chunks...' });
-      return await handleHlsDownload(probedM3u8, send, portSessions, tabId, refererUrl);
+      return await handleHlsDownload(probedM3u8, send, portSessions, tabId, effectiveReferer);
     }
 
     // Step B: Harvest sequential TS chunks
@@ -2275,8 +2304,14 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl, autoUp
   const fetchHeaders = {};
   try {
     const u = new URL(cleanUrl);
-    fetchHeaders['Referer'] = u.origin + '/';
-    fetchHeaders['Origin'] = u.origin;
+    const targetHost = u.hostname;
+    const isSelfReferencingCdn = targetHost.includes('googleapiscdn.com') ||
+                                 targetHost.includes('playhydra') ||
+                                 targetHost.includes('2embed') ||
+                                 targetHost.includes('vidsrc');
+    const ref = isSelfReferencingCdn ? `https://${targetHost}/` : (effectiveReferer || `https://${targetHost}/`);
+    fetchHeaders['Referer'] = ref;
+    try { fetchHeaders['Origin'] = (new URL(ref)).origin; } catch (_) {}
   } catch (_) {}
 
   const response = await fetch(cleanUrl, { headers: fetchHeaders });

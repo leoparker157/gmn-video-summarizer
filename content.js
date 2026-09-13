@@ -4464,7 +4464,7 @@ function probeRemoteStreamMetadata(url) {
     };
     if (port) {
       port.onMessage.addListener(handler);
-      port.postMessage({ type: 'PROBE_METADATA', url: cleanUrl });
+      port.postMessage({ type: 'PROBE_METADATA', url: cleanUrl, referer: window.location.href });
     } else {
       resolve({});
     }
@@ -9031,15 +9031,26 @@ try {
   }
 
   if (msg.type === 'FETCH_CHUNK_IN_TAB') {
-    fetch(msg.url, { credentials: 'include' })
-      .then(res => {
-        if (!res.ok) {
-          const err = new Error(`HTTP ${res.status}`);
-          err.status = res.status;
-          throw err;
+    const doFetch = (opts) => fetch(msg.url, opts).then(res => {
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      return res.blob();
+    });
+
+    // 1. Try credentials: 'omit' (CORS compliant for media CDNs like Surrit that omit Access-Control-Allow-Credentials)
+    // 2. Fallback to credentials: 'include' if required by the target host
+    // 3. Fallback to standard fetch
+    doFetch({ credentials: 'omit', mode: 'cors' })
+      .catch((err) => {
+        if (err && (err.status === 401 || err.status === 403 || err.name === 'TypeError')) {
+          return doFetch({ credentials: 'include', mode: 'cors' });
         }
-        return res.blob();
+        throw err;
       })
+      .catch(() => doFetch({}))
       .then(blob => {
         const reader = new FileReader();
         reader.onload = () => {
