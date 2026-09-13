@@ -7944,7 +7944,7 @@ function getBadgeContainer(video) {
 
   const isYt = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
   if (isYt) {
-    const ytPlayer = video.closest('#movie_player, .html5-video-player') || document.getElementById('movie_player');
+    const ytPlayer = video.closest('#movie_player, .html5-video-player, ytd-player, ytd-reel-video-renderer, #player-container') || document.getElementById('movie_player');
     if (ytPlayer) return ytPlayer;
   }
 
@@ -8974,8 +8974,36 @@ try {
   }
 } catch (_) {}
 
-window.addEventListener('load', scanVideos, { once: true });
-scanVideos();
+const triggerScan = () => {
+  if (!teardownIfOrphaned()) scanVideos();
+};
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', triggerScan, { once: true });
+}
+window.addEventListener('load', triggerScan, { once: true });
+
+// Proactive immediate and progressive scanning on initial injection
+triggerScan();
+setTimeout(triggerScan, 80);
+setTimeout(triggerScan, 250);
+setTimeout(triggerScan, 600);
+setTimeout(triggerScan, 1200);
+setTimeout(triggerScan, 2500);
+
+// YouTube & SPA lifecycle event listeners
+['yt-navigate-finish', 'yt-player-updated', 'yt-page-data-updated'].forEach((evt) => {
+  window.addEventListener(evt, () => {
+    triggerScan();
+    setTimeout(triggerScan, 250);
+    setTimeout(triggerScan, 800);
+  }, { passive: true });
+  document.addEventListener(evt, () => {
+    triggerScan();
+    setTimeout(triggerScan, 250);
+    setTimeout(triggerScan, 800);
+  }, { passive: true });
+});
 
 if (isTwimg || isMediaDoc) {
   const initMediaDoc = () => {
