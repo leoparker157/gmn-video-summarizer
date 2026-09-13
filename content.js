@@ -185,6 +185,7 @@ const DEFAULT_SETTINGS = {
   gic_v_show_video_badge: true,
   gic_v_preferred_quality: 'auto',
   gic_v_adv_tools_open: false,
+  gic_v_payload_seq_open: false,
 };
 
 // ── Gemini Model Prefill Compatibility (Adapts for 3.6, 3.7+ models) ──────────
@@ -447,6 +448,10 @@ if (!presets || typeof presets !== 'object' || Object.keys(presets).length === 0
       presets[DEFAULT_PRESET_NAME].gic_v_adv_tools_open = false;
       changed = true;
     }
+    if (presets[DEFAULT_PRESET_NAME].gic_v_payload_seq_open) {
+      presets[DEFAULT_PRESET_NAME].gic_v_payload_seq_open = false;
+      changed = true;
+    }
   }
   if (changed) {
     await store.set({ gvc_presets: presets });
@@ -464,14 +469,15 @@ if (!presets[activePresetName]) {
   activePresetName = Object.keys(presets)[0] || DEFAULT_PRESET_NAME;
 }
 
-// Automatically hide advanced tools dropdown for new users / default preset unless explicitly expanded
+// Automatically hide advanced tools and payload sequence dropdowns for new users / default preset unless explicitly expanded
 const isNewUserOrDefault = !rawStored.gvc_presets || activePresetName === DEFAULT_PRESET_NAME || rawStored.gic_v_adv_tools_open === undefined;
 const S = {
   ...DEFAULT_SETTINGS,
   ...(presets[activePresetName] || {}),
   ...rawStored,
   gic_v_adv_tools_open: isNewUserOrDefault ? false : !!rawStored.gic_v_adv_tools_open,
-  gic_v_overlay_settings_open: isNewUserOrDefault ? false : !!rawStored.gic_v_overlay_settings_open
+  gic_v_overlay_settings_open: isNewUserOrDefault ? false : !!rawStored.gic_v_overlay_settings_open,
+  gic_v_payload_seq_open: isNewUserOrDefault ? false : !!rawStored.gic_v_payload_seq_open
 };
 if (!S.gic_v_system) {
   S.gic_v_system = DEF_SYSTEM;
@@ -2725,12 +2731,17 @@ if (box) {
       </div>
 
       <div class="gvc-divider"></div>
-      <div class="gvc-section-title" style="display:flex;justify-content:space-between;align-items:center;">
-        <span>🎭 Payload Sequence</span>
-        <button class="gvc-rst-btn" id="gvc-v-rst-seq">Reset Order</button>
+      <div class="gvc-collapsible-header" id="gvc-payload-seq-toggle" title="Click to show or hide Payload Sequence">
+        <span class="gvc-section-title">🎭 Payload Sequence</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button class="gvc-rst-btn" id="gvc-v-rst-seq" title="Reset to default sequence order">Reset Order</button>
+          <span class="gvc-collapsible-arrow" id="gvc-payload-seq-arrow">${S.gic_v_payload_seq_open ? '▼' : '▶'}</span>
+        </div>
       </div>
-      <div style="font-size:11px;color:#71767b;margin-bottom:8px;">Drag and drop to re-order the JSON payload parts.</div>
-      <div id="gvc-v-seq-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:12px;"></div>
+      <div id="gvc-payload-seq-panel" style="display:${S.gic_v_payload_seq_open ? 'block' : 'none'};margin-top:6px;">
+        <div style="font-size:11px;color:#71767b;margin-bottom:8px;">Drag and drop to re-order the JSON payload parts.</div>
+        <div id="gvc-v-seq-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:12px;"></div>
+      </div>
 
       <div class="gvc-divider"></div>
       <div class="gvc-section-title">🎛️ Generation Config</div>
@@ -3052,6 +3063,7 @@ function getSettingsFromUI() {
     gic_v_show_video_badge: el('gvc-v-show-badge') ? el('gvc-v-show-badge').checked : (S.gic_v_show_video_badge !== false),
     gic_v_preferred_quality: S.gic_v_preferred_quality || 'auto',
     gic_v_adv_tools_open: false,
+    gic_v_payload_seq_open: el('gvc-payload-seq-panel') ? (el('gvc-payload-seq-panel').style.display !== 'none') : false,
     gic_v_overlay_settings_open: el('gvc-overlay-settings-panel') ? (el('gvc-overlay-settings-panel').style.display !== 'none') : false,
   };
 }
@@ -3067,6 +3079,14 @@ function applySettingsToUI(cfg) {
   const isAdvOpen = cfg.gic_v_adv_tools_open === true;
   if (advPanel) advPanel.style.display = isAdvOpen ? 'block' : 'none';
   if (advArrow) advArrow.textContent = isAdvOpen ? '▼' : '▶';
+
+  if (cfg.gic_v_payload_seq_open != null) {
+    const seqPanel = el('gvc-payload-seq-panel');
+    const seqArrow = el('gvc-payload-seq-arrow');
+    const isSeqOpen = cfg.gic_v_payload_seq_open === true;
+    if (seqPanel) seqPanel.style.display = isSeqOpen ? 'block' : 'none';
+    if (seqArrow) seqArrow.textContent = isSeqOpen ? '▼' : '▶';
+  }
 
   if (cfg.gic_v_overlay_settings_open != null) {
     const overlayPanel = el('gvc-overlay-settings-panel');
@@ -3805,6 +3825,14 @@ if (box) {
       seq = ['system','context','cot','prompt','forge','seed','prefill'];
       save('gic_v_sequence', JSON.stringify(seq));
       renderSeq();
+      const seqPanel = el('gvc-payload-seq-panel');
+      const seqArrow = el('gvc-payload-seq-arrow');
+      if (seqPanel && seqPanel.style.display === 'none') {
+        seqPanel.style.display = 'block';
+        if (seqArrow) seqArrow.textContent = '▼';
+        store.set({ gic_v_payload_seq_open: true });
+        S.gic_v_payload_seq_open = true;
+      }
       return;
     }
   });
@@ -4038,6 +4066,20 @@ if (box) {
       if (overlayArrow) overlayArrow.textContent = isCurrentlyOpen ? '▶' : '▼';
       store.set({ gic_v_overlay_settings_open: !isCurrentlyOpen });
       S.gic_v_overlay_settings_open = !isCurrentlyOpen;
+    };
+  }
+
+  const seqToggle = el('gvc-payload-seq-toggle');
+  const seqPanel = el('gvc-payload-seq-panel');
+  const seqArrow = el('gvc-payload-seq-arrow');
+  if (seqToggle && seqPanel) {
+    seqToggle.onclick = (e) => {
+      if (e.target && (e.target.id === 'gvc-v-rst-seq' || e.target.closest('#gvc-v-rst-seq'))) return;
+      const isCurrentlyOpen = seqPanel.style.display !== 'none';
+      seqPanel.style.display = isCurrentlyOpen ? 'none' : 'block';
+      if (seqArrow) seqArrow.textContent = isCurrentlyOpen ? '▶' : '▼';
+      store.set({ gic_v_payload_seq_open: !isCurrentlyOpen });
+      S.gic_v_payload_seq_open = !isCurrentlyOpen;
     };
   }
 
