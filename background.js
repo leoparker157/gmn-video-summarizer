@@ -1472,6 +1472,8 @@ async function parseHlsManifest(manifestUrl, tabId = null) {
   // Media Playlist
   let currentKey = null;
   let initSegmentUrl = null;
+  let isEncryptedDrm = false;
+  let drmFormat = null;
   const segments = [];
   let totalDuration = 0;
   const isLive = !lines.some(l => l.startsWith('#EXT-X-ENDLIST'));
@@ -1497,6 +1499,11 @@ async function parseHlsManifest(manifestUrl, tabId = null) {
             ivHex: ivMatch ? ivMatch[1] : null
           };
         }
+      } else if (attrStr.includes('METHOD=SAMPLE-AES') || attrStr.includes('KEYFORMAT="urn:') || attrStr.includes('METHOD=AES-CTR')) {
+        const formatMatch = attrStr.match(/KEYFORMAT="([^"]+)"/);
+        const methodMatch = attrStr.match(/METHOD=([A-Z0-9-]+)/);
+        drmFormat = (formatMatch && formatMatch[1]) || (methodMatch && methodMatch[1]) || 'SAMPLE-AES';
+        isEncryptedDrm = true;
       }
     }
 
@@ -1547,7 +1554,9 @@ async function parseHlsManifest(manifestUrl, tabId = null) {
     segments,
     totalDuration,
     isLive,
-    baseUrl
+    baseUrl,
+    isEncryptedDrm: Boolean(isEncryptedDrm),
+    drmFormat: drmFormat || null
   };
 }
 
@@ -1584,6 +1593,11 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
       message: `Found ${manifest.variants.length} quality variants. Selected ${selectedVariant.label || 'highest'} quality...`
     });
     manifest = await parseHlsManifest(selectedVariant.url, tabId);
+  }
+
+  if (manifest.isEncryptedDrm) {
+    const drmType = manifest.drmFormat || 'proprietary DRM / SAMPLE-AES';
+    throw new Error(`This video stream is encrypted with ${drmType}. Direct offline chunk download cannot decrypt proprietary DRM streams. Please click "🔴 Capture Screen" above to summarize directly from your player!`);
   }
 
   if (!manifest.segments || manifest.segments.length === 0) {
@@ -1762,6 +1776,15 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
           session.downloadedChunks[idx] = readyBuffer;
           session.receivedBytes += readyBuffer.byteLength;
           dynamicDelayMs = Math.max(20, dynamicDelayMs - 3);
+        } else {
+          const tries = (chunkRetries.get(idx) || 0) + 1;
+          chunkRetries.set(idx, tries);
+          if (tries >= MAX_CHUNK_RETRIES) {
+            console.warn(`[GVC HLS] Segment #${idx + 1} corrupt or empty after cleaning. Marked failed.`);
+            failedChunks.add(idx);
+          } else {
+            await new Promise(r => setTimeout(r, 200 * Math.pow(2, tries - 1)));
+          }
         }
       } else {
         const tries = (chunkRetries.get(idx) || 0) + 1;

@@ -3345,10 +3345,9 @@ if (box) {
     }
 
     if (id === 'gvc-record-fallback-btn') {
-      if (lastTargetVideoEl) {
-        const dur = Math.min(90, Math.max(15, Math.round(lastTargetVideoEl.duration || 30)));
-        recordVideoStream(lastTargetVideoEl, dur);
-      }
+      const v = (lastTargetVideoEl && lastTargetVideoEl.isConnected) ? lastTargetVideoEl : findActiveVideo();
+      const dur = Math.min(90, Math.max(15, Math.round(v?.duration || 30)));
+      recordVideoStream(v, dur);
       return;
     }
 
@@ -7857,21 +7856,8 @@ function findAllVideos() {
     } catch (_) {}
   }
 
-  if (videos.length === 0 && !isTwitter && !window.location.hostname.includes('facebook.com') && !window.location.hostname.includes('youtube.com')) {
-    try {
-      const iframes = document.querySelectorAll('iframe');
-      for (let i = 0; i < iframes.length; i++) {
-        try {
-          const f = iframes[i];
-          if (f.contentDocument) {
-            const iv = f.contentDocument.querySelectorAll('video');
-            if (iv.length) videos.push(...iv);
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
-  }
-  return Array.from(new Set(videos));
+  // Return videos that belong strictly to the current document context (iframes are handled by their own content scripts)
+  return Array.from(new Set(videos.filter(v => v && v.isConnected && v.ownerDocument === document)));
 }
 
 function findActiveVideo() {
@@ -8110,8 +8096,20 @@ let dismissedVideoBadges = new WeakSet();
 
 function attachBadgeToVideo(video) {
   if (S.gic_v_show_video_badge === false) return;
-  if (!video || !video.isConnected) return;
+  if (!video || !video.isConnected || video.ownerDocument !== document) return;
   if (dismissedVideoBadges.has(video) || video.__gvc_badge_dismissed) return;
+
+  // In an iframe (!isTopFrame), enforce strictly AT MOST ONE video badge per iframe document
+  if (!isTopFrame) {
+    const existingIframeBadge = document.querySelector('.gvc-vid-badge');
+    if (existingIframeBadge) {
+      if (!video.paused && video.currentTime > 0) {
+        updateBadgeStatus(existingIframeBadge, video);
+      }
+      return;
+    }
+  }
+
   const container = getBadgeContainer(video);
   if (!container) return;
 
@@ -8120,6 +8118,31 @@ function attachBadgeToVideo(video) {
     updateBadgeStatus(badge, video);
     return;
   }
+
+  // Hierarchy check: If parent player wrapper already has a badge
+  const playerWrapper = container.closest('.html5-video-player, #movie_player, .player, .player-embed, [data-player], .video-js, .plyr, .dplayer, .jwplayer, shreddit-player');
+  if (playerWrapper && playerWrapper !== container) {
+    const existingInWrapper = playerWrapper.querySelector('.gvc-vid-badge');
+    if (existingInWrapper) {
+      updateBadgeStatus(existingInWrapper, video);
+      return;
+    }
+  }
+
+  // Spatial bounding box collision check: avoid duplicate badges stacked near the same player corner
+  try {
+    const vRect = video.getBoundingClientRect();
+    if (vRect.width > 20 && vRect.height > 20) {
+      const allBadges = document.querySelectorAll('.gvc-vid-badge');
+      for (const b of allBadges) {
+        const br = b.getBoundingClientRect();
+        if (Math.abs(br.right - vRect.right) < 60 && Math.abs(br.top - vRect.top) < 60) {
+          updateBadgeStatus(b, video);
+          return;
+        }
+      }
+    }
+  } catch (_) {}
 
   const computedStyle = window.getComputedStyle(container);
   if (computedStyle.position === 'static' && container !== document.body) {
@@ -8134,6 +8157,21 @@ function attachBadgeToVideo(video) {
     badge.style.setProperty('top', '12px', 'important');
     badge.style.setProperty('right', '12px', 'important');
     badge.style.setProperty('z-index', '2147483647', 'important');
+
+    // Notify parent top frame so it suppresses any duplicate outer badge on this iframe
+    try {
+      window.parent.postMessage({
+        type: 'GVC_IFRAME_BADGE_ATTACHED',
+        url: window.location.href
+      }, '*');
+    } catch (_) {}
+    safeSendMessage({
+      type: 'FORWARD_TO_TOP_FRAME',
+      payload: {
+        type: 'IFRAME_BADGE_ATTACHED',
+        url: window.location.href
+      }
+    });
   }
   const isYtInitial = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
   badge.innerHTML = `
@@ -8175,6 +8213,21 @@ function attachBadgeToVideo(video) {
       dismissedVideoBadges.add(video);
       video.__gvc_badge_dismissed = true;
       badge.remove();
+      if (!isTopFrame) {
+        try {
+          window.parent.postMessage({
+            type: 'GVC_IFRAME_BADGE_DISMISSED',
+            url: window.location.href
+          }, '*');
+        } catch (_) {}
+        safeSendMessage({
+          type: 'FORWARD_TO_TOP_FRAME',
+          payload: {
+            type: 'IFRAME_BADGE_DISMISSED',
+            url: window.location.href
+          }
+        });
+      }
     }, true);
   }
 
@@ -8220,8 +8273,9 @@ function findAllVideoIframes() {
 
 function attachBadgeToIframe(iframe) {
   if (S.gic_v_show_video_badge === false) return;
-  if (!iframe || !iframe.isConnected) return;
+  if (!iframe || !iframe.isConnected || iframe.ownerDocument !== document) return;
   if (dismissedVideoBadges.has(iframe) || iframe.__gvc_badge_dismissed) return;
+  if (iframe.hasAttribute('data-gvc-inner-badge') || iframe.__gvc_inner_badge_active) return;
 
   // Mount strictly to outer player wrapper so we don't interfere with the website's inner video DOM
   const container = iframe.closest('.player-embed, #mvspan_2_top, .player, [data-player]') ||
@@ -8230,8 +8284,24 @@ function attachBadgeToIframe(iframe) {
   if (!container || container.id === 'mvspan_2' || container.classList.contains('video-row')) return;
 
   // Strict deduplication: check if this container or its parent player already has a badge
-  const existingBadge = container.querySelector('.gvc-vid-badge') || container.closest('.player, .player-embed')?.querySelector('.gvc-vid-badge');
+  const existingBadge = container.querySelector('.gvc-vid-badge') ||
+                        container.closest('.player, .player-embed, [data-player]')?.querySelector('.gvc-vid-badge') ||
+                        iframe.parentElement?.querySelector('.gvc-vid-badge');
   if (existingBadge) return;
+
+  // Spatial bounding box collision check: if any existing badge is already near the top-right corner of this iframe
+  try {
+    const fRect = iframe.getBoundingClientRect();
+    if (fRect.width > 20 && fRect.height > 20) {
+      const allBadges = document.querySelectorAll('.gvc-vid-badge');
+      for (const b of allBadges) {
+        const br = b.getBoundingClientRect();
+        if (Math.abs(br.right - fRect.right) < 70 && Math.abs(br.top - fRect.top) < 70) {
+          return;
+        }
+      }
+    }
+  } catch (_) {}
 
   const computedStyle = window.getComputedStyle(container);
   if (computedStyle.position === 'static' && container !== document.body) {
@@ -8362,6 +8432,48 @@ try {
     loadStorageItem(msg.item);
     sendResponse({ ok: true });
     return true;
+  }
+
+  if (msg.type === 'IFRAME_BADGE_ATTACHED') {
+    if (!isTopFrame) return;
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    let matchedIframe = msg.url ? iframes.find(f => {
+      try { return f.src && (f.src === msg.url || f.src.includes(msg.url) || msg.url.includes(f.src)); } catch (_) { return false; }
+    }) : null;
+    if (!matchedIframe && iframes.length === 1) matchedIframe = iframes[0];
+    if (matchedIframe) {
+      matchedIframe.setAttribute('data-gvc-inner-badge', 'true');
+      matchedIframe.__gvc_inner_badge_active = true;
+      const container = matchedIframe.closest('.player-embed, #mvspan_2_top, .player, [data-player]') ||
+                        matchedIframe.parentElement?.parentElement ||
+                        matchedIframe.parentElement;
+      if (container) {
+        container.querySelectorAll('.gvc-vid-badge').forEach(b => b.remove());
+      }
+    }
+    return;
+  }
+
+  if (msg.type === 'IFRAME_BADGE_DISMISSED') {
+    if (!isTopFrame) return;
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    let matchedIframe = msg.url ? iframes.find(f => {
+      try { return f.src && (f.src === msg.url || f.src.includes(msg.url) || msg.url.includes(f.src)); } catch (_) { return false; }
+    }) : null;
+    if (!matchedIframe && iframes.length === 1) matchedIframe = iframes[0];
+    if (matchedIframe) {
+      matchedIframe.setAttribute('data-gvc-inner-badge', 'dismissed');
+      matchedIframe.__gvc_inner_badge_active = false;
+      dismissedVideoBadges.add(matchedIframe);
+      matchedIframe.__gvc_badge_dismissed = true;
+      const container = matchedIframe.closest('.player-embed, #mvspan_2_top, .player, [data-player]') ||
+                        matchedIframe.parentElement?.parentElement ||
+                        matchedIframe.parentElement;
+      if (container) {
+        container.querySelectorAll('.gvc-vid-badge').forEach(b => b.remove());
+      }
+    }
+    return;
   }
 
   if (msg.type === 'OPEN_VIDEO_FROM_IFRAME') {
@@ -8846,7 +8958,50 @@ initDraggablePanel();
 
 // ── JWPlayer Quality Live Synchronizer ───────────────────────────────────────
 window.addEventListener('message', (e) => {
-  if (e.source !== window || !e.data) return;
+  if (!e.data || typeof e.data !== 'object') return;
+
+  // Cross-frame badge coordination between parent frame and player iframes
+  if (isTopFrame) {
+    if (e.data.type === 'GVC_IFRAME_BADGE_ATTACHED') {
+      const iframes = Array.from(document.querySelectorAll('iframe'));
+      let matchedIframe = iframes.find(f => {
+        try { return f.contentWindow === e.source; } catch (_) { return false; }
+      });
+      if (!matchedIframe && e.data.url) {
+        matchedIframe = iframes.find(f => {
+          try { return f.src && (f.src === e.data.url || f.src.includes(e.data.url) || e.data.url.includes(f.src)); } catch (_) { return false; }
+        });
+      }
+      if (!matchedIframe && iframes.length === 1) matchedIframe = iframes[0];
+      if (matchedIframe) {
+        matchedIframe.setAttribute('data-gvc-inner-badge', 'true');
+        matchedIframe.__gvc_inner_badge_active = true;
+        const container = matchedIframe.closest('.player-embed, #mvspan_2_top, .player, [data-player]') ||
+                          matchedIframe.parentElement?.parentElement ||
+                          matchedIframe.parentElement;
+        if (container) {
+          container.querySelectorAll('.gvc-vid-badge').forEach(b => b.remove());
+        }
+      }
+      return;
+    }
+    if (e.data.type === 'GVC_IFRAME_BADGE_DISMISSED') {
+      const iframes = Array.from(document.querySelectorAll('iframe'));
+      let matchedIframe = iframes.find(f => {
+        try { return f.contentWindow === e.source; } catch (_) { return false; }
+      });
+      if (!matchedIframe && iframes.length === 1) matchedIframe = iframes[0];
+      if (matchedIframe) {
+        matchedIframe.setAttribute('data-gvc-inner-badge', 'dismissed');
+        matchedIframe.__gvc_inner_badge_active = false;
+        dismissedVideoBadges.add(matchedIframe);
+        matchedIframe.__gvc_badge_dismissed = true;
+      }
+      return;
+    }
+  }
+
+  if (e.source !== window) return;
 
   if (e.data.type === 'GVC_RELOAD_EXTENSION') {
     safeSendMessage({ type: 'RELOAD_EXTENSION' });
