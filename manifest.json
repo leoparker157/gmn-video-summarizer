@@ -35,7 +35,12 @@
     },
     {
       "matches": ["<all_urls>"],
-      "exclude_matches": ["*://*.youtube.com/*", "*://youtube.com/*"],
+      "exclude_matches": [
+        "*://*.youtube.com/*",
+        "*://youtube.com/*",
+        "*://*.cloudflare.com/*",
+        "*://challenges.cloudflare.com/*"
+      ],
       "js": ["main_world.js"],
       "run_at": "document_start",
       "world": "MAIN",
@@ -48,7 +53,9 @@
         "*://accounts.youtube.com/*",
         "*://*.youtube.com/live_chat*",
         "*://*.youtube.com/live_chat_replay*",
-        "*://*.youtube.com/embed/*"
+        "*://*.youtube.com/embed/*",
+        "*://*.cloudflare.com/*",
+        "*://challenges.cloudflare.com/*"
       ],
       "js": ["content.js"],
       "css": ["content.css"],

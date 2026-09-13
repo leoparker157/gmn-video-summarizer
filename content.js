@@ -7204,6 +7204,7 @@ function triggerSilentMode2Upload({ forChat = false } = {}) {
     port.postMessage({
       type: 'DOWNLOAD',
       url: currentVideoUrl,
+      referer: window.location.href,
       autoUpload: true,
       apiKey: apiKey
     });
@@ -8405,17 +8406,24 @@ try {
   if (msg.type === 'FETCH_CHUNK_IN_TAB') {
     fetch(msg.url, { credentials: 'include' })
       .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.arrayBuffer();
+        if (!res.ok) {
+          const err = new Error(`HTTP ${res.status}`);
+          err.status = res.status;
+          throw err;
+        }
+        return res.blob();
       })
-      .then(buf => {
-        let binary = '';
-        const bytes = new Uint8Array(buf);
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
-        sendResponse({ base64: btoa(binary) });
+      .then(blob => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          const base64 = typeof dataUrl === 'string' ? dataUrl.split(',')[1] : '';
+          sendResponse({ base64, status: 200 });
+        };
+        reader.onerror = () => sendResponse({ error: 'FileReader failed', status: 500 });
+        reader.readAsDataURL(blob);
       })
-      .catch(err => sendResponse({ error: err.message }));
+      .catch(err => sendResponse({ error: err.message, status: err.status || 0 }));
     return true;
   }
 
@@ -8860,6 +8868,20 @@ window.addEventListener('message', (e) => {
           renderResolutionSelection(meta.variants);
         }
       }).catch(() => {});
+    }
+    return;
+  }
+
+  if (e.data.type === 'GVC_MSE_STREAM_DETECTED') {
+    if (!isTopFrame) {
+      safeSendMessage({
+        type: 'FORWARD_TO_TOP_FRAME',
+        payload: {
+          type: 'MSE_STREAM_DETECTED',
+          mimeType: e.data.mimeType,
+          duration: e.data.duration
+        }
+      });
     }
     return;
   }

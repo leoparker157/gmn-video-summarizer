@@ -252,8 +252,10 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
                 return; // ignore non-YouTube audio
               }
             }
-            if ((contentType.includes('text/html') || contentType.includes('application/json')) && !rawUrl.includes('.m3u8') && !rawUrl.includes('.mpd')) {
-              return; // ignore HTML/JSON documents
+            const isDisguisedChunk = rawUrl.match(/(?:seg|chunk|segment)[\d_-]+\.(?:htm|html|png|jpg|bin|txt)(\?.*)?$/i) ||
+                                     (rawUrl.includes('/chunks/') && (rawUrl.includes('token=') || rawUrl.includes('seq=') || rawUrl.includes('si=')));
+            if ((contentType.includes('text/html') || contentType.includes('application/json')) && !rawUrl.includes('.m3u8') && !rawUrl.includes('.mpd') && !isDisguisedChunk) {
+              return; // ignore true HTML/JSON documents
             }
             if (contentType.includes('video/') ||
                 contentType.includes('application/x-mpegurl') ||
@@ -271,8 +273,10 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
         }
       }
 
-      // Track TS/M4S chunk requests to detect streams even if playlist is not in webRequest
-      const isTsChunk = rawUrl.match(/\.(ts|m4s)(\?.*)?$/i) || (contentType && (contentType.includes('video/mp2t') || contentType.includes('octet-stream')));
+      // Track TS/M4S and disguised chunk requests to detect streams even if playlist is not in webRequest
+      const isDisguisedChunk = rawUrl.match(/(?:seg|chunk|segment)[\d_-]+\.(?:htm|html|png|jpg|bin|txt)(\?.*)?$/i) ||
+                               (rawUrl.includes('/chunks/') && (rawUrl.includes('token=') || rawUrl.includes('seq=') || rawUrl.includes('si=')));
+      const isTsChunk = rawUrl.match(/\.(ts|m4s)(\?.*)?$/i) || isDisguisedChunk || (contentType && (contentType.includes('video/mp2t') || contentType.includes('octet-stream')));
       if (isTsChunk && details.tabId >= 0) {
         if (!TAB_TS_CLUSTERS.has(details.tabId)) {
           TAB_TS_CLUSTERS.set(details.tabId, new Map());
@@ -288,7 +292,7 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
 
         let entry = clusters.get(baseKey);
         if (!entry) {
-          entry = { count: 0, firstUrl: rawUrl, totalBytes: 0, lastSeen: Date.now(), chunks: [] };
+          entry = { count: 0, firstUrl: rawUrl, totalBytes: 0, lastSeen: Date.now(), chunks: [], initiator: details.initiator };
           clusters.set(baseKey, entry);
         }
         entry.count++;
@@ -310,6 +314,7 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
             sizeMB: (entry.totalBytes / (1024 * 1024)).toFixed(1),
             isTsStream: true,
             label: 'MPEG-TS Stream (Multi-Chunk)',
+            initiator: details.initiator,
             discoveredAt: Date.now()
           });
         }
@@ -372,6 +377,7 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
           if (!existing.height && ytHeight) existing.height = ytHeight;
           if (ytLabel) existing.label = ytLabel;
           if (ytIsAudio) existing.isAudio = true;
+          if (details.initiator && !existing.initiator) existing.initiator = details.initiator;
         } else {
           const sizeMB = contentLength > 0 ? (contentLength / (1024 * 1024)).toFixed(1) : null;
           tabMap.set(canonKey, {
@@ -385,6 +391,7 @@ if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
             height: ytHeight,
             label: ytLabel,
             isAudio: ytIsAudio,
+            initiator: details.initiator,
             discoveredAt: Date.now()
           });
         }
@@ -523,6 +530,23 @@ async function probeStreamMetadata(url) {
             sizeMB: estMB
           };
         }
+      } catch (_) {}
+    }
+
+    // 1b. If DASH (.mpd), parse manifest to extract resolutions and tracks
+    if (isDashStreamUrl(cleanUrl)) {
+      try {
+        const manifest = await parseDashManifest(cleanUrl);
+        return {
+          url: cleanUrl,
+          isDash: true,
+          isMaster: true,
+          resolutions: manifest.variants.map(v => v.resolution).filter(Boolean),
+          variants: manifest.variants,
+          duration: Math.round(manifest.totalDuration),
+          sizeBytes: null,
+          sizeMB: null
+        };
       } catch (_) {}
     }
 
@@ -758,27 +782,62 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function configureCdnBypassRules(targetUrl, refererUrl) {
+async function getTabUrl(tabId) {
+  if (tabId == null) return null;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab?.url || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function configureCdnBypassRules(targetUrls, refererUrl) {
   if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.updateDynamicRules) return;
   try {
-    const targetHost = (new URL(targetUrl)).hostname;
-    // CRITICAL: NEVER modify headers for youtube.com, google.com or accounts domains!
-    if (targetHost.includes('youtube.com') || targetHost.includes('google.com')) return;
-    const isGoogleVideo = targetHost.includes('googlevideo.com');
-    const filter = isGoogleVideo ? '*://*.googlevideo.com/*' : `||${targetHost}/`;
-    const requestHeaders = [];
-    if (refererUrl) {
-      requestHeaders.push({ header: 'Referer', operation: 'set', value: refererUrl });
+    const urls = Array.isArray(targetUrls) ? targetUrls : [targetUrls];
+    const hostnames = new Set();
+    for (const u of urls) {
+      if (!u || typeof u !== 'string') continue;
       try {
-        const originUrl = (new URL(refererUrl)).origin;
-        requestHeaders.push({ header: 'Origin', operation: 'set', value: originUrl });
+        const h = (new URL(u)).hostname;
+        if (h && !h.includes('youtube.com') && !h.includes('google.com') && !h.includes('accounts.')) {
+          hostnames.add(h);
+        }
       } catch (_) {}
     }
 
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [1000, 1001],
-      addRules: [{
-        id: 1000,
+    if (hostnames.size === 0) return;
+
+    const removeRuleIds = [];
+    const addRules = [];
+    let ruleId = 1000;
+
+    for (const targetHost of hostnames) {
+      removeRuleIds.push(ruleId);
+
+      // Determine the best Referer and Origin for this host:
+      // If host is a self-referencing player CDN (e.g. stream.googleapiscdn.com or embed cdn):
+      const isSelfReferencingCdn = targetHost.includes('googleapiscdn.com') ||
+                                   targetHost.includes('playhydra') ||
+                                   targetHost.includes('2embed') ||
+                                   targetHost.includes('vidsrc');
+      const effectiveReferer = isSelfReferencingCdn ? `https://${targetHost}/` : (refererUrl || `https://${targetHost}/`);
+      let effectiveOrigin = `https://${targetHost}`;
+      try {
+        effectiveOrigin = (new URL(effectiveReferer)).origin;
+      } catch (_) {}
+
+      const requestHeaders = [
+        { header: 'Referer', operation: 'set', value: effectiveReferer },
+        { header: 'Origin', operation: 'set', value: effectiveOrigin }
+      ];
+
+      const isGoogleVideo = targetHost.includes('googlevideo.com');
+      const filter = isGoogleVideo ? '*://*.googlevideo.com/*' : `||${targetHost}/`;
+
+      addRules.push({
+        id: ruleId,
         priority: 1,
         action: {
           type: 'modifyHeaders',
@@ -788,7 +847,18 @@ async function configureCdnBypassRules(targetUrl, refererUrl) {
           urlFilter: filter,
           resourceTypes: ['xmlhttprequest', 'media', 'other']
         }
-      }]
+      });
+      ruleId++;
+    }
+
+    // Clean up older dynamic rules up to id 1015
+    for (let extra = ruleId; extra < 1015; extra++) {
+      removeRuleIds.push(extra);
+    }
+
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds,
+      addRules
     });
   } catch (err) {
     console.debug('[GVC DNR] Failed to set dynamic rule:', err);
@@ -798,10 +868,16 @@ async function configureCdnBypassRules(targetUrl, refererUrl) {
 // ── In-Tab Fetch Fallback (Bypasses all 403 Forbidden checks using tab session) ─
 async function fetchChunkViaTab(tabId, url) {
   if (tabId == null) return null;
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     try {
       chrome.tabs.sendMessage(tabId, { type: 'FETCH_CHUNK_IN_TAB', url }, (res) => {
-        if (chrome.runtime.lastError || !res || !res.base64) {
+        if (chrome.runtime.lastError || !res) {
+          resolve(null);
+        } else if (res.status === 429) {
+          const err = new Error('HTTP 429');
+          err.status = 429;
+          reject(err);
+        } else if (!res.base64) {
           resolve(null);
         } else {
           try {
@@ -844,10 +920,19 @@ async function fetchWithRetry(url, maxRetries = 3, timeoutMs = 10000) {
       });
       clearTimeout(timeoutId);
       if (res.ok) return res;
+      if (res.status === 429) {
+        const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
+        const err = new Error('HTTP 429');
+        err.status = 429;
+        err.retryAfter = retryAfterSec || 3;
+        throw err;
+      }
       lastErr = new Error(`HTTP ${res.status}`);
     } catch (err) {
       clearTimeout(timeoutId);
       lastErr = err;
+      // Do not spin retry immediately on 429 rate limit
+      if (err && err.status === 429) throw err;
     }
     if (attempt < maxRetries) {
       await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt - 1)));
@@ -861,6 +946,327 @@ function isHlsStreamUrl(url) {
   if (!url || typeof url !== 'string') return false;
   const lower = url.toLowerCase();
   return lower.includes('.m3u8') || lower.includes('/hls/') || lower.includes('format=m3u8') || lower.includes('m3u8=');
+}
+
+// ── Check if URL is a DASH MPD Stream ─────────────────────────────────────────
+function isDashStreamUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const lower = url.toLowerCase();
+  return lower.includes('.mpd') || lower.includes('/dash/') || lower.includes('format=mpd') || lower.includes('mpd=');
+}
+
+function parseSegmentTemplateAttributes(attrStr) {
+  const initMatch = attrStr.match(/initialization=["']([^"']+)["']/i);
+  const mediaMatch = attrStr.match(/media=["']([^"']+)["']/i);
+  const tsMatch = attrStr.match(/timescale=["'](\d+)["']/i);
+  const durMatch = attrStr.match(/duration=["'](\d+)["']/i);
+  const startMatch = attrStr.match(/startNumber=["'](\d+)["']/i);
+
+  return {
+    initialization: initMatch ? initMatch[1] : null,
+    media: mediaMatch ? mediaMatch[1] : null,
+    timescale: tsMatch ? parseInt(tsMatch[1], 10) : 1,
+    duration: durMatch ? parseInt(durMatch[1], 10) : 0,
+    startNumber: startMatch ? parseInt(startMatch[1], 10) : 1
+  };
+}
+
+// ── Universal DASH MPD Manifest Parser (Pure Regex XML for Service Worker) ────
+async function parseDashManifest(manifestUrl, tabId = null) {
+  const cleanUrl = cleanMediaUrl(manifestUrl);
+  let text = '';
+  let baseUrl = cleanUrl;
+  try {
+    const res = await fetchWithRetry(cleanUrl, 3);
+    text = await res.text();
+    baseUrl = res.url || cleanUrl;
+  } catch (err) {
+    if (tabId != null) {
+      try {
+        const tabBuf = await fetchChunkViaTab(tabId, cleanUrl);
+        if (tabBuf) {
+          text = new TextDecoder('utf-8').decode(tabBuf);
+        }
+      } catch (_) {}
+    }
+  }
+
+  if (!text) throw new Error('Could not retrieve DASH MPD manifest');
+
+  // Strip XML comments
+  text = text.replace(/<!--[\s\S]*?-->/g, '');
+
+  const baseMatch = text.match(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/i);
+  if (baseMatch && baseMatch[1]) {
+    try {
+      baseUrl = new URL(baseMatch[1].trim(), baseUrl).toString();
+    } catch (_) {}
+  }
+
+  let totalDuration = 0;
+  const durMatch = text.match(/mediaPresentationDuration=["']PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?["']/i);
+  if (durMatch) {
+    const hours = parseFloat(durMatch[1] || '0');
+    const mins = parseFloat(durMatch[2] || '0');
+    const secs = parseFloat(durMatch[3] || '0');
+    totalDuration = hours * 3600 + mins * 60 + secs;
+  }
+
+  const adaptRegex = /<AdaptationSet([\s\S]*?)<\/AdaptationSet>/gi;
+  let adaptMatch;
+  const videoRepresentations = [];
+  const audioRepresentations = [];
+
+  while ((adaptMatch = adaptRegex.exec(text)) !== null) {
+    const adaptBlock = adaptMatch[1];
+    const isVideo = adaptBlock.includes('mimeType="video/') || adaptBlock.includes("mimeType='video/") || adaptBlock.includes('contentType="video"');
+    const isAudio = adaptBlock.includes('mimeType="audio/') || adaptBlock.includes("mimeType='audio/") || adaptBlock.includes('contentType="audio"');
+
+    let setTemplate = null;
+    const setTempMatch = adaptBlock.match(/<SegmentTemplate([\s\S]*?)(?:\/>|>[\s\S]*?<\/SegmentTemplate>)/i);
+    if (setTempMatch) {
+      setTemplate = parseSegmentTemplateAttributes(setTempMatch[1]);
+    }
+
+    const repRegex = /<Representation([\s\S]*?)(?:\/>|>([\s\S]*?)<\/Representation>)/gi;
+    let repMatch;
+    while ((repMatch = repRegex.exec(adaptBlock)) !== null) {
+      const repAttrs = repMatch[1];
+      const repBody = repMatch[2] || '';
+
+      const idMatch = repAttrs.match(/id=["']([^"']+)["']/i);
+      const bwMatch = repAttrs.match(/bandwidth=["'](\d+)["']/i);
+      const wMatch = repAttrs.match(/width=["'](\d+)["']/i);
+      const hMatch = repAttrs.match(/height=["'](\d+)["']/i);
+
+      const id = idMatch ? idMatch[1] : `rep_${Math.random().toString(36).slice(2, 7)}`;
+      const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+      const width = wMatch ? parseInt(wMatch[1], 10) : 0;
+      const height = hMatch ? parseInt(hMatch[1], 10) : 0;
+
+      let repTemplate = null;
+      const repTempMatch = (repAttrs + ' ' + repBody).match(/<SegmentTemplate([\s\S]*?)(?:\/>|>[\s\S]*?<\/SegmentTemplate>)/i);
+      if (repTempMatch) {
+        repTemplate = parseSegmentTemplateAttributes(repTempMatch[1]);
+      }
+
+      const effectiveTemplate = repTemplate || setTemplate;
+      const repObj = {
+        id,
+        bandwidth,
+        width,
+        height,
+        resolution: (width && height) ? `${width}x${height}` : (height ? `${height}p` : null),
+        label: (width && height) ? `${height}p` : (bandwidth ? `${Math.round(bandwidth / 1000)}k` : 'DASH Track'),
+        template: effectiveTemplate,
+        baseUrl
+      };
+
+      if (isVideo || (!isAudio && (width > 0 || height > 0))) {
+        videoRepresentations.push(repObj);
+      } else if (isAudio) {
+        audioRepresentations.push(repObj);
+      }
+    }
+  }
+
+  videoRepresentations.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+  audioRepresentations.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+
+  return {
+    isDash: true,
+    isMaster: true,
+    variants: videoRepresentations.map(v => ({
+      ...v,
+      url: `${cleanUrl}#dash_video=${v.id}`,
+      content_type: 'application/dash+xml'
+    })),
+    videoRepresentations,
+    audioRepresentations,
+    totalDuration,
+    baseUrl
+  };
+}
+
+// ── Download DASH Streams (SegmentTemplate Assembler with Concurrency & Backoff) ─
+async function handleDashDownload(url, send, portSessions, tabId, refererUrl) {
+  startKeepAlive();
+  const cleanUrl = cleanMediaUrl(url);
+
+  if (refererUrl) {
+    await configureCdnBypassRules([cleanUrl], refererUrl);
+  }
+
+  send({ type: 'PROGRESS', message: 'Analyzing DASH MPD manifest...' });
+  const manifest = await parseDashManifest(cleanUrl, tabId);
+
+  if (!manifest.videoRepresentations || manifest.videoRepresentations.length === 0) {
+    throw new Error('No playable video tracks found in DASH MPD manifest.');
+  }
+
+  const videoRep = manifest.videoRepresentations[0];
+  send({
+    type: 'PROGRESS',
+    message: `Selected DASH track: ${videoRep.label || 'Highest Quality'}...`
+  });
+
+  const tmpl = videoRep.template;
+  if (!tmpl || !tmpl.media) {
+    throw new Error('DASH manifest uses an unsupported segment scheme.');
+  }
+
+  const chunkDurationSec = (tmpl.duration && tmpl.timescale) ? (tmpl.duration / tmpl.timescale) : 4;
+  const numChunks = manifest.totalDuration > 0
+    ? Math.ceil(manifest.totalDuration / chunkDurationSec)
+    : 30;
+
+  const chunksToDownload = [];
+  for (let i = 0; i < numChunks; i++) {
+    const num = (tmpl.startNumber || 1) + i;
+    const segRel = tmpl.media
+      .replace(/\$RepresentationID\$/g, videoRep.id)
+      .replace(/\$Number%0(\d+)d\$/g, (_, pad) => String(num).padStart(parseInt(pad, 10), '0'))
+      .replace(/\$Number\$/g, String(num))
+      .replace(/\$Time\$/g, String(i * (tmpl.duration || 1)));
+
+    const segUrl = new URL(segRel, manifest.baseUrl).toString();
+    chunksToDownload.push({ url: segUrl, seqIndex: i });
+  }
+
+  const totalSegments = chunksToDownload.length;
+  send({ type: 'PROGRESS', message: `Starting download of ${totalSegments} DASH video chunks...` });
+
+  let initBuffer = null;
+  if (tmpl.initialization) {
+    const initRel = tmpl.initialization.replace(/\$RepresentationID\$/g, videoRep.id);
+    const initUrl = new URL(initRel, manifest.baseUrl).toString();
+    try {
+      const initRes = await fetchWithRetry(initUrl, 3);
+      initBuffer = await initRes.arrayBuffer();
+    } catch (_) {}
+  }
+
+  const downloadedChunks = new Array(totalSegments);
+  const inFlight = new Set();
+  const chunkRetries = new Map();
+  const failedChunks = new Set();
+  let rateLimitBackoffUntil = 0;
+  let dynamicDelayMs = 35;
+  const CONCURRENCY = Math.min(3, Math.max(1, totalSegments));
+
+  async function worker() {
+    while (true) {
+      const now = Date.now();
+      if (now < rateLimitBackoffUntil) {
+        await new Promise(r => setTimeout(r, rateLimitBackoffUntil - now));
+      }
+      if (dynamicDelayMs > 0) {
+        await new Promise(r => setTimeout(r, dynamicDelayMs));
+      }
+
+      let idx = -1;
+      for (let i = 0; i < totalSegments; i++) {
+        if (!downloadedChunks[i] && !failedChunks.has(i) && !inFlight.has(i)) {
+          inFlight.add(i);
+          idx = i;
+          break;
+        }
+      }
+
+      if (idx === -1) {
+        if (inFlight.size > 0) {
+          await new Promise(r => setTimeout(r, 100));
+          continue;
+        }
+        break;
+      }
+
+      const seg = chunksToDownload[idx];
+      let chunkBuffer = null;
+      let isRateLimited = false;
+
+      try {
+        const chunkRes = await fetchWithRetry(seg.url, 2, 12000);
+        chunkBuffer = await chunkRes.arrayBuffer();
+      } catch (fetchErr) {
+        if (fetchErr && fetchErr.status === 429) isRateLimited = true;
+        if (tabId != null) {
+          try {
+            const tabBuf = await fetchChunkViaTab(tabId, seg.url);
+            if (tabBuf && tabBuf.byteLength > 0) chunkBuffer = tabBuf;
+          } catch (tErr) {
+            if (tErr && tErr.status === 429) isRateLimited = true;
+          }
+        }
+      } finally {
+        inFlight.delete(idx);
+      }
+
+      if (isRateLimited) {
+        rateLimitBackoffUntil = Date.now() + 3000;
+        dynamicDelayMs = Math.min(400, dynamicDelayMs + 60);
+      }
+
+      if (chunkBuffer && chunkBuffer.byteLength > 0) {
+        downloadedChunks[idx] = chunkBuffer;
+        dynamicDelayMs = Math.max(20, dynamicDelayMs - 3);
+      } else {
+        const tries = (chunkRetries.get(idx) || 0) + 1;
+        chunkRetries.set(idx, tries);
+        if (tries >= 5) {
+          failedChunks.add(idx);
+        } else {
+          await new Promise(r => setTimeout(r, 200 * Math.pow(2, tries - 1)));
+        }
+      }
+
+      const completed = downloadedChunks.filter(Boolean).length;
+      const pct = Math.min(100, Math.round((completed / totalSegments) * 100));
+      send({
+        type: 'DL_PROGRESS',
+        pct,
+        mb: ((completed * 0.4) || 0).toFixed(1),
+        chunk: completed,
+        totalChunks: totalSegments
+      });
+    }
+  }
+
+  const workers = [];
+  for (let w = 0; w < CONCURRENCY; w++) workers.push(worker());
+  await Promise.all(workers);
+
+  const validChunks = downloadedChunks.filter(Boolean);
+  if (validChunks.length === 0) {
+    throw new Error('Downloaded DASH stream produced an empty buffer.');
+  }
+
+  send({ type: 'PROGRESS', message: 'Assembling DASH fragments into MP4 container...' });
+  const allParts = initBuffer ? [initBuffer, ...validChunks] : validChunks;
+  const blob = new Blob(allParts, { type: 'video/mp4' });
+  const sizeMB = (blob.size / (1024 * 1024)).toFixed(1);
+
+  const sessionId = crypto.randomUUID();
+  SESSIONS[sessionId] = {
+    blob,
+    sizeMB,
+    fileUri: null,
+    videoUrl: cleanUrl,
+    isDash: true,
+    segmentCount: totalSegments,
+    createdAt: Date.now()
+  };
+  if (portSessions) portSessions.add(sessionId);
+
+  const dlResult = {
+    type: 'DOWNLOAD_DONE',
+    sessionId,
+    sizeMB,
+    url: cleanUrl
+  };
+  send(dlResult);
+  stopKeepAlive();
+  return dlResult;
 }
 
 // ── Parse Segment IV according to RFC 8216 Section 5.2 ────────────────────────
@@ -942,19 +1348,19 @@ function cleanTsChunk(buffer) {
   if (!buffer || buffer.byteLength < 188) return buffer;
   const u8 = new Uint8Array(buffer);
 
-  // If already starts with sync byte 0x47 and has valid 188-byte alignment
+  // 1. If already starts with sync byte 0x47 and has valid 188-byte alignment
   if (u8[0] === 0x47 && u8[188] === 0x47) {
     const cleanLength = Math.floor(u8.length / 188) * 188;
     return cleanLength === u8.length ? buffer : buffer.slice(0, cleanLength);
   }
 
-  // If starts with ID3 header: calculate ID3 size and skip it
+  // 2. If starts with ID3 header: calculate ID3 size and skip it
   if (u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33 && u8.length > 10) {
     const id3Size = ((u8[6] & 0x7f) << 21) | ((u8[7] & 0x7f) << 14) | ((u8[8] & 0x7f) << 7) | (u8[9] & 0x7f);
     const id3Total = id3Size + 10;
     if (id3Total < u8.length) {
-      for (let i = id3Total; i < Math.min(u8.length - 188, id3Total + 512); i++) {
-        if (u8[i] === 0x47 && u8[i + 188] === 0x47) {
+      for (let i = id3Total; i < Math.min(u8.length - 188, id3Total + 2048); i++) {
+        if (u8[i] === 0x47 && u8[i + 188] === 0x47 && (i + 376 >= u8.length || u8[i + 376] === 0x47)) {
           const cleanLength = Math.floor((u8.length - i) / 188) * 188;
           return buffer.slice(i, i + cleanLength);
         }
@@ -962,8 +1368,17 @@ function cleanTsChunk(buffer) {
     }
   }
 
-  // Scan for first aligned sync byte 0x47
-  for (let i = 0; i < Math.min(u8.length - 188, 1024); i++) {
+  // 3. Deep scan for first aligned sync byte 0x47 (handles dummy HTML comments / PNG signatures up to 8KB)
+  const maxScan = Math.min(u8.length - 376, 8192);
+  for (let i = 0; i < maxScan; i++) {
+    if (u8[i] === 0x47 && u8[i + 188] === 0x47 && u8[i + 376] === 0x47) {
+      const cleanLength = Math.floor((u8.length - i) / 188) * 188;
+      return buffer.slice(i, i + cleanLength);
+    }
+  }
+
+  // Fallback: 2-packet check if buffer is shorter than 3 packets
+  for (let i = 0; i < Math.min(u8.length - 188, 2048); i++) {
     if (u8[i] === 0x47 && u8[i + 188] === 0x47) {
       const cleanLength = Math.floor((u8.length - i) / 188) * 188;
       return buffer.slice(i, i + cleanLength);
@@ -1143,7 +1558,7 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
   const cleanUrl = cleanMediaUrl(url);
 
   if (refererUrl) {
-    await configureCdnBypassRules(cleanUrl, refererUrl);
+    await configureCdnBypassRules([cleanUrl], refererUrl);
   }
 
   // If already completed and cached in memory, return immediately!
@@ -1185,6 +1600,16 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
   }
 
   const totalSegments = segmentsToDownload.length;
+
+  // Configure DNR rules for both master playlist and segment CDN storage nodes
+  const targetUrlsForDnr = [cleanUrl];
+  if (segmentsToDownload.length > 0) {
+    targetUrlsForDnr.push(segmentsToDownload[0].url);
+    if (segmentsToDownload.length > 10) {
+      targetUrlsForDnr.push(segmentsToDownload[segmentsToDownload.length - 1].url);
+    }
+  }
+  await configureCdnBypassRules(targetUrlsForDnr, refererUrl);
 
   // Initialize or attach to existing session
   if (!session || session.totalSegments !== totalSegments) {
@@ -1245,40 +1670,79 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
     session.receivedBytes += session.initSegmentBuffer.byteLength;
   }
 
-  const CONCURRENCY = 5;
+  // IDM Adaptive Paced Worker Configuration
+  const chunkRetries = new Map();
+  const failedChunks = new Set();
+  let rateLimitBackoffUntil = 0;
+  let dynamicDelayMs = 35;
+  const MAX_CHUNK_RETRIES = 5;
+  const CONCURRENCY = Math.min(3, Math.max(1, totalSegments));
 
   async function worker() {
     while (session.status === 'downloading') {
+      // 1. Check rate limit backoff (e.g. after HTTP 429)
+      const now = Date.now();
+      if (now < rateLimitBackoffUntil) {
+        const waitMs = rateLimitBackoffUntil - now;
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+
+      // 2. Gentle inter-chunk pacing delay to prevent CDN burst limits
+      if (dynamicDelayMs > 0) {
+        await new Promise(r => setTimeout(r, dynamicDelayMs));
+      }
+
+      // 3. Find next chunk
       let idx = -1;
       for (let i = 0; i < totalSegments; i++) {
-        if (!session.downloadedChunks[i] && !session.inFlight.has(i)) {
+        if (!session.downloadedChunks[i] && !failedChunks.has(i) && !session.inFlight.has(i)) {
           session.inFlight.add(i);
           idx = i;
           break;
         }
       }
-      if (idx === -1) break; // All chunks either downloaded or currently in flight
+
+      if (idx === -1) {
+        if (session.inFlight.size > 0) {
+          await new Promise(r => setTimeout(r, 100));
+          continue;
+        }
+        break; // All chunks downloaded or permanently failed
+      }
 
       const seg = segmentsToDownload[idx];
       let chunkBuffer = null;
+      let isRateLimited = false;
+
       try {
-        const chunkRes = await fetchWithRetry(seg.url, 3, 12000);
+        const chunkRes = await fetchWithRetry(seg.url, 2, 12000);
         chunkBuffer = await chunkRes.arrayBuffer();
       } catch (fetchErr) {
-        // If background fetch failed (e.g. 403 Forbidden), fetch directly through the player tab/iframe!
-        if (tabId != null) {
+        if (fetchErr && fetchErr.status === 429) {
+          isRateLimited = true;
+        }
+        // If background fetch failed (e.g. 403 Forbidden), fetch directly through the player tab session!
+        if (!chunkBuffer && tabId != null) {
           try {
             const tabBuf = await fetchChunkViaTab(tabId, seg.url);
             if (tabBuf && tabBuf.byteLength > 0) {
               chunkBuffer = tabBuf;
             }
-          } catch (_) {}
-        }
-        if (!chunkBuffer) {
-          console.warn('[GUC HLS] Segment #${idx + 1} unavailable (${fetchErr.message}).');
+          } catch (tabErr) {
+            if (tabErr && tabErr.status === 429) {
+              isRateLimited = true;
+            }
+          }
         }
       } finally {
         session.inFlight.delete(idx);
+      }
+
+      // Handle rate limit (429) backoff immediately
+      if (isRateLimited) {
+        console.warn(`[GVC HLS] Rate limit (429) encountered on chunk #${idx + 1}. Applying 3s backoff...`);
+        rateLimitBackoffUntil = Date.now() + 3000;
+        dynamicDelayMs = Math.min(400, dynamicDelayMs + 60);
       }
 
       // Decrypt AES-128 chunks (works whether fetched directly or via tab session)
@@ -1297,24 +1761,37 @@ async function handleHlsDownload(url, send, portSessions, tabId, refererUrl) {
         if (readyBuffer && readyBuffer.byteLength > 0) {
           session.downloadedChunks[idx] = readyBuffer;
           session.receivedBytes += readyBuffer.byteLength;
+          dynamicDelayMs = Math.max(20, dynamicDelayMs - 3);
+        }
+      } else {
+        const tries = (chunkRetries.get(idx) || 0) + 1;
+        chunkRetries.set(idx, tries);
+        if (tries >= MAX_CHUNK_RETRIES) {
+          console.warn(`[GVC HLS] Segment #${idx + 1} permanently failed after ${MAX_CHUNK_RETRIES} attempts.`);
+          failedChunks.add(idx);
+        } else {
+          await new Promise(r => setTimeout(r, 200 * Math.pow(2, tries - 1)));
         }
       }
-      session.completedCount++;
 
       if (session.receivedBytes > MAX_VIDEO_SIZE_BYTES) {
         throw new Error(`HLS video stream exceeded the 2 GB limit (${(session.receivedBytes / (1024 * 1024)).toFixed(0)} MB). Google Gemini Files API supports a maximum file size of 2 GB (2048 MB). Please select a lower resolution variant.`);
       }
 
-      const pct = Math.round((session.completedCount / totalSegments) * 100);
+      const completed = session.downloadedChunks.filter(Boolean).length;
+      session.completedCount = completed;
+      const pct = Math.min(100, Math.round((completed / totalSegments) * 100));
       const mb = (session.receivedBytes / (1024 * 1024)).toFixed(1);
-      const estTotalMB = ((session.receivedBytes / Math.max(1, session.completedCount)) * totalSegments / (1024 * 1024)).toFixed(1);
+      const estTotalMB = completed > 0
+        ? ((session.receivedBytes / completed) * totalSegments / (1024 * 1024)).toFixed(1)
+        : '0.0';
 
       broadcast({
         type: 'DL_PROGRESS',
         pct,
         mb,
         totalMB: estTotalMB,
-        chunk: session.completedCount,
+        chunk: completed,
         totalChunks: totalSegments
       });
     }
@@ -1640,6 +2117,10 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl, autoUp
     return await handleHlsDownload(cleanUrl, send, portSessions, tabId, refererUrl);
   }
 
+  if (isDashStreamUrl(cleanUrl)) {
+    return await handleDashDownload(cleanUrl, send, portSessions, tabId, refererUrl);
+  }
+
   // Check if URL is a TS or M4S chunk
   const isTsOrChunk = cleanUrl.match(/\.(ts|m4s|m2ts)(\?.*)?$/i);
   if (isTsOrChunk) {
@@ -1732,7 +2213,7 @@ async function handleDownload(url, send, portSessions, tabId, refererUrl, autoUp
 }
 
 // ── Analyze (Upload → Poll → Generate with Auto-Retry) ───────────────────────
-async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retryCount = 5, retryDelayMs = 2200, payload }, send, portSessions = null, tabId = null) {
+async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retryCount = 5, retryDelayMs = 2200, payload, referer }, send, portSessions = null, tabId = null) {
   const abortState = createAbortState(sessionId);
   try {
     startKeepAlive();
@@ -1753,7 +2234,20 @@ async function handleAnalyze({ sessionId, videoUrl, fileUri, apiKey, model, retr
       } else if (videoUrl) {
         const cleanUrl = cleanMediaUrl(videoUrl);
         if (isHlsStreamUrl(cleanUrl)) {
-          const dlResult = await handleHlsDownload(cleanUrl, send, portSessions, tabId);
+          const effectiveReferer = referer || (tabId != null ? (await getTabUrl(tabId)) : null);
+          const dlResult = await handleHlsDownload(cleanUrl, send, portSessions, tabId, effectiveReferer);
+          const activeDl = ACTIVE_DOWNLOADS.get(cleanUrl);
+          const effectiveSessionId = dlResult?.sessionId || activeDl?.result?.sessionId;
+          if (effectiveSessionId && SESSIONS[effectiveSessionId]) {
+            sessionId = effectiveSessionId;
+            session = SESSIONS[effectiveSessionId];
+          } else if (sessionId && SESSIONS[sessionId]) {
+            session = SESSIONS[sessionId];
+          }
+          if (portSessions && sessionId) portSessions.add(sessionId);
+        } else if (isDashStreamUrl(cleanUrl)) {
+          const effectiveReferer = referer || (tabId != null ? (await getTabUrl(tabId)) : null);
+          const dlResult = await handleDashDownload(cleanUrl, send, portSessions, tabId, effectiveReferer);
           const activeDl = ACTIVE_DOWNLOADS.get(cleanUrl);
           const effectiveSessionId = dlResult?.sessionId || activeDl?.result?.sessionId;
           if (effectiveSessionId && SESSIONS[effectiveSessionId]) {

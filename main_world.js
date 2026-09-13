@@ -120,12 +120,20 @@
   // Facebook relies on Relay GraphQL and typing autosave/analytics.
   if (!isYouTube && !isFacebook) {
     try {
+      const isPlaylistUrl = (u) => {
+        if (!u || typeof u !== 'string') return false;
+        const lower = u.toLowerCase();
+        return lower.includes('.m3u8') || lower.includes('/hls/') || lower.includes('.mpd') ||
+               lower.includes('format=m3u8') || lower.includes('m3u8=') || lower.includes('/dash/') ||
+               lower.includes('playlist.m3u8') || lower.includes('master.m3u8');
+      };
+
       const origFetch = window.fetch;
       window.fetch = function(...args) {
         const p = origFetch.apply(this, args);
         try {
           const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
-          if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
+          if (isPlaylistUrl(url)) {
             M3U8_CACHE.set(url, { url, time: Date.now() });
             window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
           } else if (isTwitter && url && (url.includes('/graphql/') || url.includes('/i/api/'))) {
@@ -143,7 +151,7 @@
         this._gvcUrl = args[1];
         try {
           const url = args[1];
-          if (url && (url.includes('.m3u8') || url.includes('/hls/'))) {
+          if (isPlaylistUrl(url)) {
             M3U8_CACHE.set(url, { url, time: Date.now() });
             window.postMessage({ type: 'GVC_M3U8_CAPTURED', url }, '*');
           }
@@ -162,6 +170,29 @@
           });
           return origSend.apply(this, args);
         };
+      }
+    } catch (_) {}
+
+    // ── Hook MediaSource & SourceBuffer for MSE Stream Sniffing ───────────────
+    try {
+      if (typeof window.MediaSource === 'function') {
+        const origAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
+        if (typeof origAddSourceBuffer === 'function') {
+          MediaSource.prototype.addSourceBuffer = function(mimeType) {
+            const sb = origAddSourceBuffer.apply(this, arguments);
+            try {
+              if (mimeType && typeof mimeType === 'string') {
+                window.postMessage({
+                  type: 'GVC_MSE_STREAM_DETECTED',
+                  mimeType,
+                  duration: this.duration || 0,
+                  time: Date.now()
+                }, '*');
+              }
+            } catch (_) {}
+            return sb;
+          };
+        }
       }
     } catch (_) {}
   }
