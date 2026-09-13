@@ -65,6 +65,13 @@ GMN Video Summarizer offers two distinct processing architectures tailored for s
 - **How It Works**: Captures the decrypted video and audio stream directly from the active HTML5 player element using `captureStream()`.
 - **When to Use**: Designed as a reliable fallback for streams protected by custom DRM shields (e.g. `SAMPLE-AES`, `urn:avs:shield`) or Cloudflare Turnstile barriers where raw chunk downloads are restricted.
 
+#### 4. Local Video File Upload & Drag-and-Drop (Max 2GB)
+- **Direct In-Extension Dropzone**: Open the summarizer panel on any page and use the dropzone to select or drag & drop any local video (`.mp4`, `.webm`, `.mov`, `.mkv`, `.avi`, `.mp3`, `.wav`).
+  - **8MB Chunked Resumable Upload**: Streams large video files (up to 2GB) in robust 8MB slices directly to the Google Gemini Files API with real-time percentage progress.
+  - **Instant 48-Hour Content Hash Caching**: Computes a fast cryptographic fingerprint (<10ms). Re-analyzing the same local video takes 0 seconds and consumes zero additional upload bandwidth.
+- **Drag & Drop into Chrome Tab (`file:///...`)**: Drag any video file from your computer into Chrome. The extension displays the floating "Summarize Video" badge for 1-click analysis.
+  - *Tip*: Enable **Allow access to file URLs** in `chrome://extensions` > **GMN Universal Video Summarizer** > **Details** to permit extension scripts to run on local `file:///` tabs.
+
 ---
 
 ## 🚀 Installation

@@ -2687,3 +2687,61 @@
 .gvc-collapsible-header:hover .gvc-collapsible-arrow {
   color: #1d9bf0;
 }
+
+/* ── Local File Dropzone & Universal Upload ── */
+.gvc-dropzone {
+  border: 1.5px dashed #333639;
+  border-radius: 10px;
+  padding: 14px 10px;
+  text-align: center;
+  cursor: pointer;
+  background: #080808;
+  transition: border-color .2s, background .2s, box-shadow .2s;
+  margin-top: 8px;
+  user-select: none;
+}
+
+.gvc-dropzone:hover {
+  border-color: #1d9bf0;
+  background: rgba(29, 155, 240, 0.04);
+}
+
+.gvc-dropzone.gvc-dragover {
+  border-color: #1d9bf0 !important;
+  background: rgba(29, 155, 240, 0.12) !important;
+  box-shadow: 0 0 14px rgba(29, 155, 240, 0.3) !important;
+}
+
+.gvc-drop-icon {
+  font-size: 22px;
+  margin-bottom: 4px;
+}
+
+.gvc-drop-text {
+  font-size: 12px;
+  color: #e7e9ea;
+}
+
+.gvc-drop-text b {
+  color: #1d9bf0;
+}
+
+.gvc-drop-sub {
+  font-size: 10px;
+  color: #71767b;
+  margin-top: 3px;
+  line-height: 1.35;
+}
+
+.gvc-file-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #111418;
+  border: 1px solid rgba(29, 155, 240, 0.35);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  box-sizing: border-box;
+}

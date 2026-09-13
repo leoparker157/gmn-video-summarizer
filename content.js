@@ -40,6 +40,7 @@ let currentVideoUrl = null;
 let currentVideoLabel = '';
 let currentVideoSizeMB = '0';
 let currentGoogleFileUri = null;
+let currentLocalFile = null;
 const deadFileUris = new Set();
 let availableVariants = [];
 let selectedVariant = null;
@@ -107,7 +108,11 @@ if (!isExtensionValid()) return;
 const isTwitter = /https?:\/\/(www\.)?(x|twitter)\.com/i.test(window.location.href);
 const isTwimg = window.location.hostname.includes('twimg.com');
 const isXPlatform = isTwitter || isTwimg;
-const isMediaDoc = isTwimg || (!isTwitter && (document.contentType && document.contentType.startsWith('video/')));
+const isFileUrl = window.location.protocol === 'file:';
+const isMediaDoc = isTwimg || isFileUrl || (!isTwitter && (
+  (document.contentType && (document.contentType.startsWith('video/') || document.contentType.startsWith('audio/'))) ||
+  (Boolean(document.querySelector('video, audio')) && Boolean(document.body) && document.body.children.length <= 3)
+));
 
 const DEFAULT_KEY   = '';
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
@@ -1374,7 +1379,14 @@ function updateActionButtonState(customState = null) {
     return;
   }
 
-  // 5. Generic Non-YouTube Video Streams
+  // 5. Local File Upload
+  if (currentLocalFile) {
+    elSend.disabled = false;
+    elSend.innerText = currentGoogleFileUri ? 'Analyze Video' : 'Upload & Analyze Video';
+    return;
+  }
+
+  // 6. Generic Non-YouTube Video Streams
   const isGenericGoogle = isGoogleFilesUri(currentGoogleFileUri);
   const isGenericKeyMismatch = isGenericGoogle && !isCachedItemKeyMatch({ fileUri: currentGoogleFileUri });
   const isReady = !!(sessionId || (currentGoogleFileUri && !isGenericKeyMismatch));
@@ -2758,6 +2770,22 @@ if (box) {
       </div>
       <div id="gvc-vid-display" class="gvc-vid-info">Searching for video streams...</div>
 
+      <div id="gvc-local-file-info" class="gvc-file-badge" style="display:none;">
+        <span style="font-size:16px;">🎬</span>
+        <div style="flex:1;min-width:0;">
+          <div id="gvc-local-file-name" style="font-weight:600;color:#e7e9ea;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+          <div id="gvc-local-file-size" style="font-size:11px;color:#71767b;"></div>
+        </div>
+        <button id="gvc-remove-file" class="gvc-btn-icon" style="color:#f4212e;border:none;background:transparent;cursor:pointer;padding:2px 6px;font-size:13px;font-weight:700;" title="Remove file">✕</button>
+      </div>
+
+      <div id="gvc-dropzone" class="gvc-dropzone">
+        <div class="gvc-drop-icon">📁</div>
+        <div class="gvc-drop-text"><b>Choose a local video clip</b> or drag & drop</div>
+        <div class="gvc-drop-sub">Supports MP4, WebM, MOV, MKV, MP3, WAV • <b>Max 2GB</b> (8MB chunked upload)</div>
+      </div>
+      <input type="file" id="gvc-file-input" accept="video/*,audio/*,.mp4,.mkv,.webm,.mov,.avi,.flv,.mp3,.wav,.m4a" style="display:none;">
+
       <div class="gvc-lbl" style="display:flex;justify-content:space-between;align-items:center;">
         <span>User Prompt <span class="gvc-saved" id="gvc-v-prompt-saved">Saved</span></span>
         <button class="gvc-rst-btn" id="gvc-v-rst-prompt">Reset</button>
@@ -2918,6 +2946,334 @@ function showBox() {
     box.style.top = t + 'px';
     box.style.right = 'auto';
     box.style.bottom = 'auto';
+  }
+}
+
+// ── Fast Content-Based Cryptographic Fingerprint for Local Videos ────────────
+async function computeLocalFileHash(file) {
+  const size = file.size;
+  const SAMPLE_SIZE = 64 * 1024; // 64KB
+  const chunks = [];
+
+  // 1. Head sample
+  chunks.push(await file.slice(0, Math.min(SAMPLE_SIZE, size)).arrayBuffer());
+
+  // 2. Middle sample
+  if (size > SAMPLE_SIZE * 4) {
+    const mid = Math.floor(size / 2);
+    chunks.push(await file.slice(mid, mid + SAMPLE_SIZE).arrayBuffer());
+  }
+
+  // 3. Tail sample
+  if (size > SAMPLE_SIZE * 2) {
+    const tail = Math.max(0, size - SAMPLE_SIZE);
+    chunks.push(await file.slice(tail, size).arrayBuffer());
+  }
+
+  const totalLen = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+  const combined = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    combined.set(new Uint8Array(c), offset);
+    offset += c.byteLength;
+  }
+
+  const hashBuffer = await crypto.subtle.digest('SHA-256', combined);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 24);
+
+  return `lh_${size}_${hashHex}`;
+}
+
+// ── Local File 8MB Chunked Resumable Upload (Background Service Worker Stream) ─────
+function readSliceAsBase64(slice) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result;
+      const base64 = (typeof dataUrl === 'string' && dataUrl.includes(',')) ? dataUrl.split(',')[1] : '';
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(slice);
+  });
+}
+
+async function uploadLocalFileViaPort(file, apiKey, onProgress) {
+  const CHUNK = 8 * 1024 * 1024; // 8MB per chunk
+  const total = file.size;
+  if (total === 0) throw new Error('Cannot upload an empty video file.');
+  const nChunks = Math.ceil(total / CHUNK);
+  const mimeType = file.type || 'video/mp4';
+
+  if (typeof onProgress === 'function') {
+    onProgress({ message: `Initializing 8MB chunk upload for ${(total / (1024 * 1024)).toFixed(1)}MB video...` });
+  }
+
+  return new Promise((resolve, reject) => {
+    connectPort();
+
+    const listener = async (msg) => {
+      if (msg.type === 'UPLOAD_REQUEST_CHUNK') {
+        const start = msg.offset;
+        const end = Math.min(start + CHUNK, total);
+        const isLast = end >= total;
+        const pct = Math.round((start / total) * 100);
+
+        if (typeof onProgress === 'function') {
+          onProgress({
+            pct: pct,
+            message: `Uploading to Google Files API: chunk ${msg.chunkIndex + 1}/${nChunks} (${pct}%)...`
+          });
+        }
+
+        try {
+          const slice = file.slice(start, end);
+          const base64 = await readSliceAsBase64(slice);
+          port.postMessage({
+            type: 'CHUNK_PAYLOAD',
+            chunkIndex: msg.chunkIndex,
+            offset: start,
+            isLast: isLast,
+            base64: base64
+          });
+        } catch (err) {
+          port.onMessage.removeListener(listener);
+          reject(new Error('Reading local file slice failed: ' + err.message));
+        }
+      } else if (msg.type === 'LOCAL_UPLOAD_PROGRESS') {
+        if (typeof onProgress === 'function') onProgress({ message: msg.message });
+      } else if (msg.type === 'LOCAL_UPLOAD_DONE') {
+        port.onMessage.removeListener(listener);
+        resolve({ uri: msg.fileUri, name: msg.fileName, fileResourceName: msg.fileResourceName, sessionId: msg.sessionId, sizeMB: msg.sizeMB });
+      } else if (msg.type === 'LOCAL_UPLOAD_ERROR') {
+        port.onMessage.removeListener(listener);
+        reject(new Error(msg.message));
+      }
+    };
+
+    port.onMessage.addListener(listener);
+
+    port.postMessage({
+      type: 'START_CHUNKED_UPLOAD',
+      totalBytes: total,
+      fileName: file.name,
+      mimeType: mimeType,
+      apiKey: apiKey,
+      nChunks: nChunks
+    });
+  });
+}
+
+// ── Local File Selection & Dropzone Handler ──────────────────────────────────
+function initDropzone() {
+  const dropzone = el('gvc-dropzone');
+  const fileInput = el('gvc-file-input');
+  const btnRemove = el('gvc-remove-file');
+
+  if (!dropzone || !fileInput) return;
+
+  dropzone.onclick = () => fileInput.click();
+
+  fileInput.onchange = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      handleSelectedLocalFile(e.target.files[0]);
+    }
+  };
+
+  dropzone.ondragover = (e) => {
+    e.preventDefault();
+    dropzone.classList.add('gvc-dragover');
+  };
+
+  dropzone.ondragleave = () => {
+    dropzone.classList.remove('gvc-dragover');
+  };
+
+  dropzone.ondrop = (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('gvc-dragover');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleSelectedLocalFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  if (btnRemove) {
+    btnRemove.onclick = (e) => {
+      e.stopPropagation();
+      clearLocalFile();
+    };
+  }
+
+  if (box) {
+    box.addEventListener('dragover', (e) => {
+      if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
+        e.preventDefault();
+        dropzone.classList.add('gvc-dragover');
+      }
+    });
+    box.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget && box.contains(e.relatedTarget)) return;
+      dropzone.classList.remove('gvc-dragover');
+    });
+    box.addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+        e.preventDefault();
+        dropzone.classList.remove('gvc-dragover');
+        handleSelectedLocalFile(e.dataTransfer.files[0]);
+      }
+    });
+  }
+}
+
+async function handleSelectedLocalFile(file) {
+  if (!file) return;
+
+  const MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2GB Google Files API Limit
+  if (file.size > MAX_BYTES) {
+    const sizeGB = (file.size / (1024 * 1024 * 1024)).toFixed(2);
+    alert(`⚠️ File Too Large: Videos must be under 2GB (Google API limit).\nSelected file is ${sizeGB} GB. Please choose a smaller clip or compress it.`);
+    clearLocalFile();
+    return;
+  }
+
+  currentLocalFile = file;
+  currentVideoUrl = null;
+  currentGoogleFileUri = null;
+  currentYouTubeData = null;
+  availableVariants = [];
+  selectedVariant = null;
+
+  const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+  const nameEl = el('gvc-local-file-name');
+  const sizeEl = el('gvc-local-file-size');
+  if (nameEl) nameEl.textContent = file.name;
+  if (sizeEl) sizeEl.textContent = `(${sizeMB} MB)`;
+
+  const infoEl = el('gvc-local-file-info');
+  const dropEl = el('gvc-dropzone');
+  if (infoEl) infoEl.style.display = 'flex';
+  if (dropEl) dropEl.style.display = 'none';
+
+  updateActionButtonState();
+
+  const display = el('gvc-vid-display');
+  if (display) {
+    display.style.display = 'block';
+    display.innerHTML = `
+      <div class="gvc-card" style="padding:10px;">
+        <div style="font-size:12px;font-weight:600;color:#e7e9ea;display:flex;align-items:center;gap:6px;">
+          <span>🎬</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;" title="${esc(file.name)}">${esc(file.name)}</span>
+        </div>
+        <div style="font-size:11px;color:#71767b;margin-top:4px;">Local Video File (${sizeMB} MB)</div>
+        <div id="gvc-local-cache-status" style="color:#1d9bf0;font-size:11px;margin-top:3px;"><span class="gvc-spinner"></span> Checking content hash cache...</div>
+      </div>
+    `;
+  }
+
+  // Fast content hash calculation and cache check
+  try {
+    const fileHash = await computeLocalFileHash(file);
+    sessionId = fileHash;
+
+    const stored = await store.get('gvc_url_cache');
+    const cache = stored.gvc_url_cache || {};
+    const cached = cache[fileHash];
+
+    const statusEl = el('gvc-local-cache-status');
+    if (cached && cached.fileUri && (Date.now() - (cached.timestamp || cached.createdAt || 0) < 44 * 3600 * 1000) && isCachedItemKeyMatch(cached)) {
+      currentGoogleFileUri = cached.fileUri;
+      if (statusEl) {
+        statusEl.style.color = '#00ba7c';
+        statusEl.innerHTML = '⚡ <b>Active on Google Files API</b> (Recognized by Content Hash • Instant Analysis Ready)';
+      }
+      const elOut = el('gvc-out');
+      if (elOut) elOut.innerText = `Recognized previously uploaded video (${sizeMB}MB). Active on Google Files API. Ready to analyze.`;
+    } else {
+      if (statusEl) {
+        statusEl.style.color = '#00ba7c';
+        statusEl.innerHTML = '✓ Ready for 8MB chunked upload (Max 2GB)';
+      }
+    }
+  } catch (_) {
+    sessionId = 'local_' + encodeURIComponent(file.name) + '_' + file.size;
+  }
+  updateActionButtonState();
+}
+
+function clearLocalFile() {
+  currentLocalFile = null;
+  const fileInput = el('gvc-file-input');
+  if (fileInput) fileInput.value = '';
+
+  const infoEl = el('gvc-local-file-info');
+  const dropEl = el('gvc-dropzone');
+  if (infoEl) infoEl.style.display = 'none';
+  if (dropEl) dropEl.style.display = 'block';
+
+  if (!currentVideoUrl && !currentGoogleFileUri) {
+    const display = el('gvc-vid-display');
+    if (display) {
+      display.innerHTML = 'Searching for video streams...';
+    }
+  }
+  updateActionButtonState();
+}
+
+async function handleFileUrlDoc(cleanUrl, fileName) {
+  const display = el('gvc-vid-display');
+  if (display) {
+    display.innerHTML = `
+      <div class="gvc-card" style="padding:10px;">
+        <div style="font-size:12px;font-weight:600;color:#e7e9ea;display:flex;align-items:center;gap:6px;">
+          <span>🎬</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;" title="${esc(fileName)}">${esc(fileName)}</span>
+        </div>
+        <div style="font-size:11px;color:#71767b;margin-top:4px;">Local Video File (Chrome Tab)</div>
+        <div id="gvc-local-cache-status" style="color:#1d9bf0;font-size:11px;margin-top:3px;"><span class="gvc-spinner"></span> Loading local file data...</div>
+      </div>
+    `;
+  }
+  try {
+    let blob = null;
+    try {
+      const resp = await fetch(cleanUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      blob = await resp.blob();
+    } catch (fetchErr) {
+      blob = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', cleanUrl, true);
+        xhr.responseType = 'blob';
+        xhr.onload = () => {
+          if (xhr.response) resolve(xhr.response);
+          else reject(new Error('Empty response from local file'));
+        };
+        xhr.onerror = () => reject(new Error('Failed to load file:// URL via XHR'));
+        xhr.send();
+      });
+    }
+    const file = new File([blob], fileName, { type: blob.type || 'video/mp4' });
+    await handleSelectedLocalFile(file);
+  } catch (err) {
+    console.warn('[GVC] Could not read file URL directly:', err);
+    if (display) {
+      display.innerHTML = `
+        <div class="gvc-card" style="padding:10px;">
+          <div style="font-size:12px;font-weight:600;color:#e7e9ea;display:flex;align-items:center;gap:6px;">
+            <span>🎬</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px;">${esc(fileName)}</span>
+          </div>
+          <div style="font-size:11px;color:#71767b;margin-top:4px;">Local Video File</div>
+          <div style="color:#ffd166;font-size:11px;margin-top:6px;line-height:1.4;">
+            💡 Direct browser reading was restricted by Chrome security. You can analyze this video immediately by choosing or dropping it into the dropzone below!
+          </div>
+        </div>
+      `;
+    }
+    const dropzone = el('gvc-dropzone');
+    if (dropzone) dropzone.style.display = 'block';
   }
 }
 
@@ -4015,6 +4371,7 @@ if (box) {
     });
   }
 
+  initDropzone();
   syncGeminiPrefillCompatibility(el('gvc-v-model') ? el('gvc-v-model').value : DEFAULT_MODEL);
 }
 
@@ -5404,13 +5761,19 @@ async function extractVideoInfo(vEl) {
     return;
   }
 
-  // Instant direct stream resolution on twimg.com / raw media URLs
+  // Instant direct stream resolution on twimg.com / raw media URLs / file URLs
   if (isTwimg || isMediaDoc) {
     const rawUrl = (vEl && (vEl.currentSrc || vEl.src)) || (document.querySelector('video')?.currentSrc || document.querySelector('video')?.src) || window.location.href;
-    if (rawUrl && (rawUrl.startsWith('http') || rawUrl.startsWith('blob:'))) {
+    if (rawUrl && (rawUrl.startsWith('http') || rawUrl.startsWith('blob:') || rawUrl.startsWith('file:'))) {
       const cleanUrl = cleanMediaUrl(rawUrl);
       currentVideoUrl = cleanUrl;
-      const fileName = cleanUrl.split('?')[0].split('/').pop() || 'Direct Video Stream';
+      const fileName = decodeURIComponent(cleanUrl.split('?')[0].split('/').pop() || 'Direct Video Stream');
+
+      if (cleanUrl.startsWith('file:')) {
+        await handleFileUrlDoc(cleanUrl, fileName);
+        return;
+      }
+
       selectedVariant = { url: cleanUrl, label: 'Direct Stream', meta: fileName, content_type: 'video/mp4' };
       availableVariants = [selectedVariant];
 
@@ -5419,6 +5782,7 @@ async function extractVideoInfo(vEl) {
     }
   }
 
+  clearLocalFile();
   const collectedVariants = [];
 
   // Extract Twitter / X Tweet ID if on Twitter platform
@@ -7492,7 +7856,7 @@ function triggerAnalysis() {
   port.postMessage({
     type:         'ANALYZE',
     sessionId:    sessionId,
-    videoUrl:     currentVideoUrl,
+    videoUrl:     currentVideoUrl || (currentLocalFile ? `file://local/${encodeURIComponent(currentLocalFile.name)}` : null),
     fileUri:      currentGoogleFileUri,
     apiKey:       apiKey,
     model:        el('gvc-v-model')?.value || 'gemini-2.5-flash',
@@ -7784,6 +8148,82 @@ async function handleMainActionClick() {
           }, 4000);
           return;
         }
+      }
+    }
+
+    // ── Local File Upload Handling ───────────────────────────────────────────
+    if (currentLocalFile) {
+      if (!currentGoogleFileUri) {
+        switchNavTab('main');
+        if (box && box.classList.contains('gvc-chat-open')) closeChatPane();
+        lastSummaryText = '';
+        const elSend = el('gvc-send');
+        const elCncl = el('gvc-cancel');
+        const elOut = el('gvc-out');
+        isProcessing = true;
+        isDownloading = false;
+        updateActionButtonState('analyzing');
+        if (elCncl) elCncl.style.setProperty('display', 'block', 'important');
+        const resArea = el('gvc-result-area');
+        if (resArea) resArea.style.display = 'block';
+        const rawArea = el('gvc-raw');
+        if (rawArea) rawArea.style.display = 'none';
+        if (elOut) {
+          elOut.style.display = 'block';
+          elOut.innerText = `Preparing 8MB chunked upload for ${currentLocalFile.name} (${(currentLocalFile.size / (1024 * 1024)).toFixed(1)}MB)...`;
+        }
+
+        try {
+          const fileObj = await uploadLocalFileViaPort(currentLocalFile, apiKey, (p) => {
+            if (elOut) elOut.innerText = p.message;
+            if (p.pct != null) {
+              updateActionButtonState(`⏳ Uploading (${p.pct}%)...`);
+            }
+          });
+          currentGoogleFileUri = fileObj.uri;
+          if (fileObj.sessionId) sessionId = fileObj.sessionId;
+
+          const sizeMB = (currentLocalFile.size / (1024 * 1024)).toFixed(1);
+          const fileHash = await computeLocalFileHash(currentLocalFile);
+
+          // Save in 48-hour cache by content hash
+          const stored = await store.get('gvc_url_cache');
+          const cache = stored.gvc_url_cache || {};
+          cache[fileHash] = {
+            fileUri: fileObj.uri,
+            fileResourceName: fileObj.name || fileObj.fileResourceName,
+            sizeMB: sizeMB,
+            label: currentLocalFile.name,
+            timestamp: Date.now(),
+            apiKeyLast4: (apiKey && typeof apiKey === 'string') ? apiKey.trim().slice(-4) : ''
+          };
+          await store.set({ gvc_url_cache: cache });
+
+          // Save into Storage History
+          await saveToStorageHistory({
+            fileUri: fileObj.uri,
+            fileResourceName: fileObj.name || fileObj.fileResourceName,
+            pageUrl: 'file://local/' + encodeURIComponent(currentLocalFile.name),
+            pageTitle: currentLocalFile.name,
+            cleanUrl: 'file://local/' + encodeURIComponent(currentLocalFile.name),
+            platform: 'Local Video',
+            sizeMB: sizeMB,
+            mimeType: currentLocalFile.type || 'video/mp4',
+            apiKeyLast4: (apiKey && typeof apiKey === 'string') ? apiKey.trim().slice(-4) : ''
+          });
+
+          if (elOut) elOut.innerText = 'Video uploaded & active on Google Files API. Analyzing with Gemini...';
+          triggerAnalysis();
+        } catch (err) {
+          isProcessing = false;
+          updateActionButtonState();
+          if (elCncl) elCncl.style.setProperty('display', 'none', 'important');
+          if (elOut) elOut.innerText = '❌ Local Upload Error: ' + err.message;
+        }
+        return;
+      } else {
+        triggerAnalysis();
+        return;
       }
     }
 

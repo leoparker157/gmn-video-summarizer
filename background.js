@@ -760,6 +760,108 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (msg.type === 'CHECK_NETWORK') {
         const health = await checkNetworkHealth();
         send({ type: 'NETWORK_HEALTH_RESULT', health });
+      } else if (msg.type === 'START_CHUNKED_UPLOAD') {
+        const { totalBytes, fileName, mimeType, apiKey, nChunks } = msg;
+        try {
+          startKeepAlive();
+          const initRes = await fetch(
+            `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(apiKey)}`,
+            {
+              method: 'POST',
+              headers: {
+                'X-Goog-Upload-Protocol': 'resumable',
+                'X-Goog-Upload-Command': 'start',
+                'X-Goog-Upload-Header-Content-Length': String(totalBytes),
+                'X-Goog-Upload-Header-Content-Type': mimeType || 'video/mp4',
+                'Content-Type': 'application/json',
+                'x-goog-api-key': apiKey
+              },
+              body: JSON.stringify({ file: { display_name: fileName || `local_video_${Date.now()}` } })
+            }
+          );
+
+          if (!initRes.ok) {
+            const t = await initRes.text();
+            throw new Error(`Google Files API session init failed (${initRes.status}): ${t}`);
+          }
+
+          const sessionUrl = initRes.headers.get('x-goog-upload-url') || initRes.headers.get('X-Goog-Upload-URL');
+          if (!sessionUrl) throw new Error('Google did not return an upload session URL. Check your Gemini API key.');
+
+          port._uploadSession = { sessionUrl, totalBytes, mimeType, apiKey, fileName };
+          send({ type: 'UPLOAD_REQUEST_CHUNK', chunkIndex: 0, offset: 0 });
+        } catch (e) {
+          stopKeepAlive();
+          send({ type: 'LOCAL_UPLOAD_ERROR', message: e.message });
+        }
+      } else if (msg.type === 'CHUNK_PAYLOAD') {
+        if (!port._uploadSession) {
+          send({ type: 'LOCAL_UPLOAD_ERROR', message: 'No active upload session in background' });
+          return;
+        }
+        const { chunkIndex, offset, isLast, base64 } = msg;
+        const { sessionUrl, mimeType, apiKey, fileName, totalBytes } = port._uploadSession;
+
+        try {
+          const binary = atob(base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+
+          const res = await fetch(sessionUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Length': String(bytes.length),
+              'X-Goog-Upload-Offset': String(offset),
+              'X-Goog-Upload-Command': isLast ? 'upload, finalize' : 'upload',
+              'Content-Type': mimeType || 'video/mp4'
+            },
+            body: bytes
+          });
+
+          if (isLast) {
+            if (!res.ok) {
+              const err = await res.text();
+              throw new Error(`Chunk ${chunkIndex + 1} finalization failed (${res.status}): ${err}`);
+            }
+            const data = await res.json();
+            const fileUri = data.file && data.file.uri;
+            const fileResourceName = (data.file && data.file.name) || fileUri;
+            if (!fileUri) throw new Error('Google Files API did not return file URI');
+
+            send({ type: 'LOCAL_UPLOAD_PROGRESS', message: 'Gemini is processing video frames...' });
+            await pollFileState(fileResourceName || fileUri, apiKey, send);
+
+            const sizeMB = (totalBytes / (1024 * 1024)).toFixed(1);
+            const sessionId = 'local_' + Date.now();
+            SESSIONS[sessionId] = {
+              blob: null,
+              sizeMB,
+              fileUri,
+              fileResourceName,
+              videoUrl: `file://local/${encodeURIComponent(fileName || 'clip')}`,
+              label: fileName || 'Local Video',
+              createdAt: Date.now()
+            };
+            if (portSessions) portSessions.add(sessionId);
+
+            delete port._uploadSession;
+            stopKeepAlive();
+            send({ type: 'LOCAL_UPLOAD_DONE', fileUri, fileName: fileName || 'Local Video', fileResourceName, sessionId, sizeMB });
+          } else {
+            if (res.status !== 308 && res.status !== 200) {
+              const err = await res.text();
+              throw new Error(`Chunk ${chunkIndex + 1} rejected (${res.status}): ${err}`);
+            }
+            const nextOffset = offset + bytes.length;
+            send({ type: 'UPLOAD_REQUEST_CHUNK', chunkIndex: chunkIndex + 1, offset: nextOffset });
+          }
+        } catch (e) {
+          delete port._uploadSession;
+          stopKeepAlive();
+          send({ type: 'LOCAL_UPLOAD_ERROR', message: e.message });
+        }
       }
     } catch (e) {
       send({ type: 'ERROR', message: e.message });
@@ -768,6 +870,10 @@ chrome.runtime.onConnect.addListener((port) => {
 
   port.onDisconnect.addListener(() => {
     isPortOpen = false;
+    if (port._uploadSession) {
+      delete port._uploadSession;
+      stopKeepAlive();
+    }
     for (const id of portSessions) {
       const abortState = ACTIVE_ABORTS.get(id);
       if (abortState) {
@@ -2850,7 +2956,10 @@ async function uploadInChunks(blob, uploadUrl, apiKey, send) {
 
 // ── Google Files API: Poll File Processing State ──────────────────────────────
 async function pollFileState(fileResourceName, apiKey, send, abortState = null) {
-  const fileApiUrl = `https://generativelanguage.googleapis.com/v1beta/${fileResourceName}?key=${encodeURIComponent(apiKey)}`;
+  const resourceName = (fileResourceName && typeof fileResourceName === 'string' && fileResourceName.startsWith('http'))
+    ? fileResourceName.replace(/^.*\/v1beta\//, '')
+    : fileResourceName;
+  const fileApiUrl = `https://generativelanguage.googleapis.com/v1beta/${resourceName}?key=${encodeURIComponent(apiKey)}`;
   let pollAttempts = 0;
   let serverErrorCount = 0;
   const startTime = Date.now();
