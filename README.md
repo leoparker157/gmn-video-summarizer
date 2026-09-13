@@ -37,7 +37,7 @@ A fast, lightweight browser extension that generates AI-powered video summaries,
 
 1. **Clone or Download** this repository:
    ```bash
-   git clone https://github.com/leoparker157/summaryVideos.git
+   git clone https://github.com/leoparker157/gmn-video-summarizer.git
    ```
    *(or download and extract the repository ZIP)*.
 
@@ -47,7 +47,7 @@ A fast, lightweight browser extension that generates AI-powered video summaries,
 
 3. Enable **Developer mode** via the toggle switch in the top-right corner.
 
-4. Click **Load unpacked** and select the `summaryVideos` directory.
+4. Click **Load unpacked** and select the `gmn-video-summarizer` directory.
 
 ---
 
