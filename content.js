@@ -7850,25 +7850,20 @@ function findAllVideos() {
     }
   }
 
-  // Deep scan for all open shadow roots across document
-  try {
-    const scanShadows = (root) => {
-      if (!root) return;
-      try {
-        const all = root.querySelectorAll('*');
-        for (let i = 0; i < all.length; i++) {
-          const node = all[i];
-          if (node && node.shadowRoot) {
-            knownShadowHosts.add(node);
-            const sv = node.shadowRoot.querySelectorAll('video');
-            if (sv.length) videos.push(...sv);
-            scanShadows(node.shadowRoot);
-          }
+  // If direct videos are already found, avoid scanning entire DOM tree
+  if (videos.length === 0) {
+    try {
+      const playerHosts = document.querySelectorAll('[class*="player"], [id*="player"], video-js, shreddit-player, [data-player]');
+      for (let i = 0; i < playerHosts.length; i++) {
+        const sr = playerHosts[i].shadowRoot;
+        if (sr) {
+          knownShadowHosts.add(playerHosts[i]);
+          const sv = sr.querySelectorAll('video');
+          if (sv.length) videos.push(...sv);
         }
-      } catch (_) {}
-    };
-    scanShadows(document.body || document.documentElement);
-  } catch (_) {}
+      }
+    } catch (_) {}
+  }
 
   const iframes = document.querySelectorAll('iframe');
   for (const f of iframes) {
