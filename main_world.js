@@ -5,212 +5,11 @@
 (function() {
   'use strict';
   const isYouTube = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
-  if (isYouTube && (window.self !== window.top || window.location.hostname !== 'www.youtube.com' || window.location.pathname.startsWith('/live_chat') || window.location.pathname.startsWith('/embed') || window.location.hostname === 'accounts.youtube.com')) {
+  if (isYouTube && (window.self !== window.top || (window.location.hostname !== 'www.youtube.com' && window.location.hostname !== 'm.youtube.com') || window.location.pathname.startsWith('/live_chat') || window.location.pathname.startsWith('/embed') || window.location.hostname === 'accounts.youtube.com')) {
     return;
   }
   if (window.__GVC_MAIN_WORLD_INJECTED__) return;
   window.__GVC_MAIN_WORLD_INJECTED__ = true;
-
-  // ── Universal Keyboard Isolation Shield for Extension Inputs & Textareas ──
-  // Prevents any keystrokes typed into GMN textboxes (chat, prompts, API keys, timestamps, etc.)
-  // from triggering host page hotkeys (YouTube player shortcuts, Twitter feed navigation, Twitch, Vimeo, etc.).
-
-  let textShield = null;
-  function getTextShield() {
-    if (!textShield || !textShield.isConnected) {
-      try {
-        textShield = document.createElement('textarea');
-        textShield.id = 'gvc-active-shield';
-        textShield.setAttribute('data-gvc-shield', 'true');
-        textShield.setAttribute('data-gvc-typing', 'true');
-        textShield.setAttribute('role', 'textbox');
-        textShield.setAttribute('aria-hidden', 'true');
-        textShield.tabIndex = -1;
-        textShield.style.cssText = 'position:fixed !important;top:-9999px !important;left:-9999px !important;width:1px !important;height:1px !important;opacity:0 !important;pointer-events:none !important;z-index:-2147483647 !important;';
-        try {
-          Object.defineProperty(textShield, 'isContentEditable', { value: true, configurable: true });
-        } catch (_) {}
-        (document.body || document.documentElement).appendChild(textShield);
-      } catch (_) {}
-    }
-    return textShield;
-  }
-
-  const origActiveDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement');
-
-  function isGvcActive(e) {
-    // 1. Shared synchronous attribute set by content.js whenever any input/textarea is focused or typing
-    if (document.documentElement && document.documentElement.hasAttribute('data-gvc-typing')) {
-      return true;
-    }
-    const host = document.getElementById('gvc-root-container');
-    if (host && (host.hasAttribute('data-gvc-typing') || host.getAttribute('data-gvc-typing') === 'true')) {
-      return true;
-    }
-
-    // 2. Event target or composed path inspection
-    if (e) {
-      const target = e.target || e.srcElement;
-      if (target) {
-        if (target.id === 'gvc-root-container' || target.id === 'gvc-box' || target.id === 'gvc-active-shield') return true;
-        if (target.hasAttribute && (target.hasAttribute('data-gvc-typing') || target.hasAttribute('data-gvc-shield'))) return true;
-        if (target.closest && (target.closest('#gvc-root-container') || target.closest('#gvc-box') || target.closest('.gvc-vid-badge'))) return true;
-        if (target.classList && typeof target.classList.contains === 'function' && target.classList.contains('gvc-vid-badge')) return true;
-      }
-      if (typeof e.composedPath === 'function') {
-        const path = e.composedPath();
-        for (let i = 0; i < path.length; i++) {
-          const node = path[i];
-          if (!node) continue;
-          if (node.id === 'gvc-root-container' || node.id === 'gvc-box' || node.id === 'gvc-active-shield') return true;
-          if (node.hasAttribute && (node.hasAttribute('data-gvc-typing') || node.hasAttribute('data-gvc-shield'))) return true;
-          if (node.classList && typeof node.classList.contains === 'function' && node.classList.contains('gvc-vid-badge')) return true;
-        }
-      }
-    }
-
-    // 3. Raw document.activeElement check
-    try {
-      const rawActive = origActiveDesc && origActiveDesc.get ? origActiveDesc.get.call(document) : document.activeElement;
-      if (rawActive) {
-        if (rawActive.id === 'gvc-root-container' || rawActive.id === 'gvc-box' || rawActive.id === 'gvc-active-shield') return true;
-        if (rawActive.hasAttribute && (rawActive.hasAttribute('data-gvc-typing') || rawActive.hasAttribute('data-gvc-shield'))) return true;
-        if (rawActive.classList && typeof rawActive.classList.contains === 'function' && rawActive.classList.contains('gvc-vid-badge')) return true;
-      }
-    } catch (_) {}
-
-    return false;
-  }
-
-  // 1. Hook Document.prototype.activeElement:
-  // When user is focused inside GMN HUD, return textShield (a genuine TEXTAREA)
-  // so any video player or web framework shortcut guard immediately treats focus as a text field.
-  try {
-    if (origActiveDesc && origActiveDesc.get && origActiveDesc.configurable) {
-      Object.defineProperty(Document.prototype, 'activeElement', {
-        get: function() {
-          const active = origActiveDesc.get.call(this);
-          if (isGvcActive() || (active && (active.id === 'gvc-root-container' || active.id === 'gvc-box' || (active.classList && active.classList.contains('gvc-vid-badge'))))) {
-            return getTextShield();
-          }
-          return active;
-        },
-        configurable: true,
-        enumerable: true
-      });
-    }
-  } catch (_) {}
-
-  // 2. Hook Event.prototype.target, srcElement, and composedPath:
-  // When keyboard events fire while typing in GMN, spoof the event target as textShield
-  // so any page listener checking e.target.tagName or isTextInput(e.target) sees a TEXTAREA.
-  try {
-    const origTargetDesc = Object.getOwnPropertyDescriptor(Event.prototype, 'target');
-    if (origTargetDesc && origTargetDesc.get && origTargetDesc.configurable) {
-      Object.defineProperty(Event.prototype, 'target', {
-        get: function() {
-          const realTarget = origTargetDesc.get.call(this);
-          if (this && (this instanceof KeyboardEvent || (typeof this.type === 'string' && this.type.startsWith('key')))) {
-            if (isGvcActive(this)) {
-              return getTextShield();
-            }
-          }
-          return realTarget;
-        },
-        configurable: true,
-        enumerable: true
-      });
-    }
-
-    const origSrcElementDesc = Object.getOwnPropertyDescriptor(Event.prototype, 'srcElement');
-    if (origSrcElementDesc && origSrcElementDesc.get && origSrcElementDesc.configurable) {
-      Object.defineProperty(Event.prototype, 'srcElement', {
-        get: function() {
-          const realTarget = origSrcElementDesc.get.call(this);
-          if (this && (this instanceof KeyboardEvent || (typeof this.type === 'string' && this.type.startsWith('key')))) {
-            if (isGvcActive(this)) {
-              return getTextShield();
-            }
-          }
-          return realTarget;
-        },
-        configurable: true,
-        enumerable: true
-      });
-    }
-
-    const origComposedPath = Event.prototype.composedPath;
-    if (typeof origComposedPath === 'function') {
-      Event.prototype.composedPath = function() {
-        const path = origComposedPath.call(this);
-        if (this && (this instanceof KeyboardEvent || (typeof this.type === 'string' && this.type.startsWith('key')))) {
-          if (isGvcActive(this)) {
-            const shield = getTextShield();
-            if (path && path.length > 0 && path[0] !== shield) {
-              return [shield, ...path];
-            }
-          }
-        }
-        return path;
-      };
-    }
-  } catch (_) {}
-
-  // 3. Intercept EventTarget.prototype.addEventListener / removeEventListener:
-  // Neutralizes host page keyboard listeners (window, document, player containers)
-  // during active GMN typing turns, preventing hotkeys from triggering entirely.
-  try {
-    const origAddEventListener = EventTarget.prototype.addEventListener;
-    const origRemoveEventListener = EventTarget.prototype.removeEventListener;
-    const gvcWrappedListeners = new WeakMap();
-
-    EventTarget.prototype.addEventListener = function(type, listener, options) {
-      if (['keydown', 'keyup', 'keypress'].includes(type) && listener) {
-        let wrapped = function(event) {
-          if (isGvcActive(event)) {
-            // Typing in GMN input: completely suppress the host page's hotkey handler
-            return;
-          }
-          if (typeof listener === 'function') {
-            return listener.apply(this, arguments);
-          } else if (listener && typeof listener.handleEvent === 'function') {
-            return listener.handleEvent.apply(listener, arguments);
-          }
-        };
-
-        if (typeof listener === 'function' || typeof listener === 'object') {
-          gvcWrappedListeners.set(listener, wrapped);
-        }
-
-        return origAddEventListener.call(this, type, wrapped, options);
-      }
-      return origAddEventListener.apply(this, arguments);
-    };
-
-    EventTarget.prototype.removeEventListener = function(type, listener, options) {
-      if (['keydown', 'keyup', 'keypress'].includes(type) && listener) {
-        const wrapped = gvcWrappedListeners.get(listener);
-        if (wrapped) {
-          return origRemoveEventListener.call(this, type, wrapped, options);
-        }
-      }
-      return origRemoveEventListener.apply(this, arguments);
-    };
-  } catch (_) {}
-
-  // 4. Global stopPropagation listeners on window and document
-  ['keydown', 'keyup', 'keypress'].forEach(function(evtType) {
-    const stopBubble = function(e) {
-      if (isGvcActive(e)) {
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === 'function') {
-          e.stopImmediatePropagation();
-        }
-      }
-    };
-    window.addEventListener(evtType, stopBubble, false);
-    document.addEventListener(evtType, stopBubble, false);
-  });
 
   // Cache: tweetId -> video_info object
   const VIDEO_CACHE = new Map();
@@ -266,6 +65,7 @@
   }
 
   const isTwitter = window.location.hostname.includes('twitter.com') || window.location.hostname.includes('x.com');
+  const isFacebook = window.location.hostname.includes('facebook.com') || window.location.hostname.includes('messenger.com');
 
   // ── Hook HLS.js attachMedia to Capture Master Manifests ─────────────────────
   function hookHls(HlsClass) {
@@ -295,7 +95,7 @@
     }
   }
 
-  if (!isYouTube) {
+  if (!isYouTube && !isFacebook) {
     try {
       let _Hls = window.Hls;
       if (_Hls) {
@@ -315,10 +115,10 @@
   }
 
   // ── Hook Fetch & XMLHttpRequest for Playlists & Twitter GraphQL ─────────────
-  // STRICT GUARD: NEVER hook fetch or XMLHttpRequest on YouTube!
-  // YouTube relies on delicate authentication and cookie rotation handshakes (RotateCookies, live chat).
-  // Hooking window.fetch on YouTube breaks internal session sync and causes random logouts.
-  if (!isYouTube) {
+  // STRICT GUARD: NEVER hook fetch or XMLHttpRequest on YouTube or Facebook!
+  // YouTube relies on delicate authentication and cookie rotation handshakes.
+  // Facebook relies on Relay GraphQL and typing autosave/analytics.
+  if (!isYouTube && !isFacebook) {
     try {
       const origFetch = window.fetch;
       window.fetch = function(...args) {
@@ -350,17 +150,19 @@
         } catch (_) {}
         return origOpen.apply(this, args);
       };
-      XMLHttpRequest.prototype.send = function(...args) {
-        this.addEventListener('load', function() {
-          try {
-            if (isTwitter && this._gvcUrl && (this._gvcUrl.includes('/graphql/') || this._gvcUrl.includes('/i/api/'))) {
-              const json = JSON.parse(this.responseText);
-              harvestVideos(json);
-            }
-          } catch (_) {}
-        });
-        return origSend.apply(this, args);
-      };
+      if (isTwitter) {
+        XMLHttpRequest.prototype.send = function(...args) {
+          this.addEventListener('load', function() {
+            try {
+              if (this._gvcUrl && (this._gvcUrl.includes('/graphql/') || this._gvcUrl.includes('/i/api/'))) {
+                const json = JSON.parse(this.responseText);
+                harvestVideos(json);
+              }
+            } catch (_) {}
+          });
+          return origSend.apply(this, args);
+        };
+      }
     } catch (_) {}
   }
 

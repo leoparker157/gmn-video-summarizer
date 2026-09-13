@@ -2472,19 +2472,9 @@ const box = isTopFrame ? document.createElement('div') : null;
 const show = (v) => v ? 'block' : 'none';
 const chk  = (v) => v ? 'checked' : '';
 
-// ── Universal Keyboard & Textbox Isolation Shield (Module-level Scope) ─────
-// Completely isolates all extension inputs and textareas from host page hotkeys (e.g. YouTube, Twitter, Twitch).
-const setGvcTypingState = (isTyping) => {
-  try {
-    if (isTyping) {
-      document.documentElement.setAttribute('data-gvc-typing', 'true');
-      if (host) host.setAttribute('data-gvc-typing', 'true');
-    } else {
-      document.documentElement.removeAttribute('data-gvc-typing');
-      if (host) host.removeAttribute('data-gvc-typing');
-    }
-  } catch (_) {}
-};
+// ── Clean Keystroke Isolation for Extension Inputs & Textareas ──────────────
+// Prevents keystrokes typed inside GMN inputs from bubbling to the host page without touching document prototypes.
+const setGvcTypingState = () => {};
 
 const isTextInputElement = (node) => {
   if (!node) return false;
@@ -2499,23 +2489,9 @@ const isolateInputKeystrokes = (targetEl) => {
   if (!targetEl || targetEl.__gvc_isolated__) return;
   targetEl.__gvc_isolated__ = true;
 
-  targetEl.addEventListener('focus', () => setGvcTypingState(true), true);
-  targetEl.addEventListener('blur', () => {
-    setTimeout(() => {
-      const active = shadowRoot ? shadowRoot.activeElement : null;
-      if (!isTextInputElement(active)) {
-        setGvcTypingState(false);
-      }
-    }, 70);
-  }, true);
-
   ['keydown', 'keyup', 'keypress'].forEach(evtType => {
     targetEl.addEventListener(evtType, (e) => {
-      setGvcTypingState(true);
       e.stopPropagation();
-      if (typeof e.stopImmediatePropagation === 'function') {
-        e.stopImmediatePropagation();
-      }
     }, false);
   });
 };
@@ -2900,38 +2876,10 @@ if (box) {
   }
 
   if (box) {
-    // Focus tracking delegation inside HUD
-    box.addEventListener('focusin', (e) => {
-      if (isTextInputElement(e.target)) {
-        setGvcTypingState(true);
-      }
-    }, true);
-
-    box.addEventListener('focusout', (e) => {
-      setTimeout(() => {
-        const active = shadowRoot ? shadowRoot.activeElement : null;
-        if (!isTextInputElement(active)) {
-          setGvcTypingState(false);
-        }
-      }, 70);
-    }, true);
-
-    // Capture phase on box: whenever typing in an input, enforce typing attribute
-    ['keydown', 'keyup', 'keypress'].forEach(evtType => {
-      box.addEventListener(evtType, (e) => {
-        if (isTextInputElement(e.target) || (shadowRoot && isTextInputElement(shadowRoot.activeElement))) {
-          setGvcTypingState(true);
-        }
-      }, true);
-    });
-
-    // Bubble phase on box: completely stop propagation so keystrokes never leave shadow root
+    // Bubble phase on box: completely stop propagation so keystrokes never leave the extension panel
     ['keydown', 'keyup', 'keypress'].forEach(evtType => {
       box.addEventListener(evtType, (e) => {
         e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === 'function') {
-          e.stopImmediatePropagation();
-        }
       }, false);
     });
 
@@ -2960,41 +2908,9 @@ if (box) {
     ['keydown', 'keyup', 'keypress'].forEach(evtType => {
       host.addEventListener(evtType, (e) => {
         e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === 'function') {
-          e.stopImmediatePropagation();
-        }
       }, false);
     });
   }
-
-  ['keydown', 'keyup', 'keypress'].forEach(evtType => {
-    window.addEventListener(evtType, (e) => {
-      const path = e.composedPath ? e.composedPath() : [];
-      let isInsideGvc = false;
-      for (let i = 0; i < path.length; i++) {
-        const node = path[i];
-        if (!node) continue;
-        if (node === host || node === box || node.id === 'gvc-root-container' || node.id === 'gvc-box') {
-          isInsideGvc = true;
-          break;
-        }
-      }
-      if (!isInsideGvc && document.documentElement && document.documentElement.hasAttribute('data-gvc-typing')) {
-        isInsideGvc = true;
-      }
-      if (!isInsideGvc && document.activeElement) {
-        if (document.activeElement === host || document.activeElement.id === 'gvc-root-container' || (document.activeElement.classList && document.activeElement.classList.contains('gvc-vid-badge'))) {
-          isInsideGvc = true;
-        }
-      }
-      if (isInsideGvc) {
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === 'function') {
-          e.stopImmediatePropagation();
-        }
-      }
-    }, false);
-  });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -4102,9 +4018,6 @@ if (box) {
     isolateInputKeystrokes(chatInput);
     chatInput.addEventListener('keydown', (e) => {
       e.stopPropagation();
-      if (typeof e.stopImmediatePropagation === 'function') {
-        e.stopImmediatePropagation();
-      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendChatMessage();
@@ -7907,12 +7820,17 @@ function findAllVideos() {
     } catch (_) {}
   }
 
-  const iframes = document.querySelectorAll('iframe');
-  for (const f of iframes) {
+  if (videos.length === 0 && !isTwitter && !window.location.hostname.includes('facebook.com') && !window.location.hostname.includes('youtube.com')) {
     try {
-      if (f.contentDocument) {
-        const iv = f.contentDocument.querySelectorAll('video');
-        if (iv.length) videos.push(...iv);
+      const iframes = document.querySelectorAll('iframe');
+      for (let i = 0; i < iframes.length; i++) {
+        try {
+          const f = iframes[i];
+          if (f.contentDocument) {
+            const iv = f.contentDocument.querySelectorAll('video');
+            if (iv.length) videos.push(...iv);
+          }
+        } catch (_) {}
       }
     } catch (_) {}
   }
@@ -8021,15 +7939,6 @@ function getBadgeContainer(video) {
                   video.closest('div[style*="aspect-ratio"]');
 
   if (wrapper) return wrapper;
-
-  let cur = video.parentElement;
-  while (cur && cur !== document.body && cur !== document.documentElement) {
-    const cs = window.getComputedStyle(cur);
-    if (cs.position === 'relative' || cs.position === 'absolute' || cs.position === 'fixed') {
-      return cur;
-    }
-    cur = cur.parentElement;
-  }
 
   return video.parentElement || document.body;
 }
@@ -8240,12 +8149,15 @@ function attachBadgeToVideo(video) {
 }
 
 function findAllVideoIframes() {
+  if (isTwitter || window.location.hostname.includes('facebook.com') || window.location.hostname.includes('youtube.com')) {
+    return [];
+  }
   const iframes = Array.from(document.querySelectorAll('iframe'));
   return iframes.filter(iframe => {
     const src = (iframe.src || iframe.dataset.src || '').toLowerCase();
     if (!src || src === 'about:blank') return false;
 
-    if (src.includes('google') || src.includes('doubleclick') || src.includes('amazon') || src.includes('facebook.com/tr')) {
+    if (src.includes('google') || src.includes('doubleclick') || src.includes('amazon') || src.includes('facebook.com')) {
       return false;
     }
 
@@ -8256,7 +8168,7 @@ function findAllVideoIframes() {
       return true;
     }
 
-    if (iframe.closest('.player, .player-embed, .video-row, #mvspan_2_top, #player, [class*="player" i], [id*="player" i], [class*="video" i], [id*="video" i]')) {
+    if (iframe.closest('.player, .player-embed, .video-row, #mvspan_2_top, #player, .video-js')) {
       return true;
     }
 
@@ -8362,33 +8274,19 @@ function scanVideos() {
   }
 }
 
-// ── Context Menu & Action Click Listener ──────────────────────────────────────
-// lastContextVideo initialized at module top
+// ── Context Menu Target Tracker ──────────────────────────────────────────────
+// Records the video under the cursor passively so background.js can summarize it on context menu click
 document.addEventListener('contextmenu', (e) => {
   const t = e.target;
-  if (t && (t.id === 'gvc-root-container' || (t.closest && t.closest('#gvc-root-container, #gvc-box')))) return; // Never intercept context menu inside extension panel
+  if (!t || t.id === 'gvc-root-container' || (t.closest && t.closest('#gvc-root-container, #gvc-box'))) return;
 
-  let v = null;
-  if (t && t.tagName === 'VIDEO') {
-    v = t;
-  } else if (t && t.closest) {
-    v = t.closest('video') || t.closest('#movie_player, .html5-video-player, [data-video-id], .video-js, .plyr, .dplayer, .jwplayer')?.querySelector('video');
+  if (t.tagName === 'VIDEO') {
+    lastContextVideo = t;
+  } else if (t.closest) {
+    const v = t.closest('video') || t.closest('#movie_player, .html5-video-player, [data-video-id], .video-js, .plyr, .dplayer, .jwplayer')?.querySelector('video');
+    if (v) lastContextVideo = v;
   }
-  if (!v) v = findActiveVideo();
-  if (v) lastContextVideo = v;
-
-  // Direct right-click on video or video player overlay opens the summarizer panel!
-  // Unless user is holding Ctrl or Alt (for browser inspector)
-  const isPlayerClick = t && (t.tagName === 'VIDEO' || Boolean(t.closest && t.closest('#movie_player, .html5-video-player, .gvc-vid-badge, [data-testid="videoComponent"], .video-js, .plyr, .dplayer, .jwplayer')));
-  if (isPlayerClick && !e.ctrlKey && !e.altKey) {
-    if (!e.shiftKey) {
-      // Prevent default page context menu (e.g. YouTube "Stats for nerds")
-      try { e.preventDefault(); e.stopPropagation(); } catch (_) {}
-    }
-    const targetVideo = v || lastContextVideo || findActiveVideo();
-    openAndExtract(targetVideo);
-  }
-}, true);
+}, { passive: true });
 
 try {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -8674,29 +8572,40 @@ function debouncedScan() {
 
 domMutationObserver = new MutationObserver((mutations) => {
   if (teardownIfOrphaned()) return;
+  if (S.gic_v_show_video_badge === false) return;
+
+  const activeEl = document.activeElement;
+  const isUserTyping = Boolean(activeEl && (activeEl.isContentEditable || activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || (activeEl.getAttribute && activeEl.getAttribute('role') === 'textbox')));
+
   let shouldScan = false;
   for (let i = 0; i < mutations.length; i++) {
     const m = mutations[i];
     if (m.addedNodes && m.addedNodes.length > 0) {
-      if (isTwitter) {
-        shouldScan = true;
-        break;
-      }
       for (let j = 0; j < m.addedNodes.length; j++) {
         const node = m.addedNodes[j];
-        if (node.nodeType === 1) { // Element node
-          const tag = node.tagName;
-          if (tag === 'VIDEO' || tag === 'IFRAME') {
-            shouldScan = true;
-            break;
-          } else if (node.firstElementChild && node.querySelector('video, iframe')) {
-            shouldScan = true;
-            break;
-          }
-          if (node.shadowRoot) {
-            knownShadowHosts.add(node);
-            shouldScan = true;
-            break;
+        if (!node || node.nodeType !== 1) continue;
+
+        // Ultra-fast skip for text typing in focused input / contenteditable / Lexical / Draft.js
+        if (isUserTyping && activeEl.contains(node)) continue;
+        if (node.isContentEditable || node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || (node.getAttribute && node.getAttribute('role') === 'textbox')) continue;
+
+        const tag = node.tagName;
+        if (tag === 'VIDEO' || tag === 'IFRAME') {
+          shouldScan = true;
+          break;
+        }
+        if (node.shadowRoot) {
+          knownShadowHosts.add(node);
+          shouldScan = true;
+          break;
+        }
+        if (node.firstElementChild) {
+          const idOrClass = (node.id || '') + ' ' + (typeof node.className === 'string' ? node.className : '');
+          if (/player|video|movie|media/i.test(idOrClass)) {
+            if (node.querySelector('video, iframe')) {
+              shouldScan = true;
+              break;
+            }
           }
         }
       }
@@ -8715,11 +8624,15 @@ if (document.documentElement) {
   });
 }
 
-window.addEventListener('scroll', debouncedScan, { passive: true });
 scanIntervalId = setInterval(() => {
   if (teardownIfOrphaned()) return;
-  if (!document.hidden) scanVideos();
-}, 2000);
+  if (document.hidden) return;
+  const active = document.activeElement;
+  if (active && (active.isContentEditable || active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active.getAttribute && active.getAttribute('role') === 'textbox'))) {
+    return; // User is actively typing: do not interrupt typing thread
+  }
+  scanVideos();
+}, 2500);
 
 // ── Standalone / Direct Raw Video Page Support (video.twimg.com / direct video URLs) ──
 function attachMediaDocumentBadge() {
