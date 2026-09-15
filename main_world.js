@@ -1140,8 +1140,30 @@
       })();
     }
   });
-
-
+  // ── SPA History Navigation Interceptor ──────────────────────────────────────
+  try {
+    const notifyNav = () => {
+      window.postMessage({ type: 'GVC_NAVIGATED', url: window.location.href }, '*');
+    };
+    const origPushState = history.pushState;
+    if (typeof origPushState === 'function') {
+      history.pushState = function() {
+        const ret = origPushState.apply(this, arguments);
+        notifyNav();
+        return ret;
+      };
+    }
+    const origReplaceState = history.replaceState;
+    if (typeof origReplaceState === 'function') {
+      history.replaceState = function() {
+        const ret = origReplaceState.apply(this, arguments);
+        notifyNav();
+        return ret;
+      };
+    }
+    window.addEventListener('popstate', notifyNav, { passive: true });
+    window.addEventListener('hashchange', notifyNav, { passive: true });
+  } catch (_) {}
 
 })();
 

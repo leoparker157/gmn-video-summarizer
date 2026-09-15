@@ -51,6 +51,7 @@ let autoAnalyzeOnDownload = false;
 let isProcessing = false;
 let isDownloading = false;
 let hasAnalyzedCurrentVideo = false;
+let currentBoundVideoIdentifier = null;
 let lastAnalyzedMode = null;
 let lastActivityTs = Date.now();
 let lastPongTs = Date.now();
@@ -581,6 +582,117 @@ function extractPlatformInfo(url) {
   return { platform: 'Web Video', icon: '🌐', badgeClass: 'gvc-plat-web' };
 }
 
+// ── Precise Video Identity & Complete Analysis State Reset ───────────────────
+function getVideoFingerprint(vEl = null, ytData = null, pageUrl = null) {
+  const currentUrl = pageUrl || window.location.href;
+  const yt = ytData || currentYouTubeData;
+  if (yt && yt.videoId) return 'yt_' + yt.videoId;
+
+  const ytMatch = currentUrl.match(/(?:youtu\.be\/|v=|\/embed\/|\/shorts\/)([a-zA-Z0-9_-]{11})/);
+  if (ytMatch) return 'yt_' + ytMatch[1];
+
+  const vidId = extractVideoIdentifier(currentUrl);
+  if (vidId) return 'id_' + vidId;
+
+  const targetEl = vEl || (typeof lastTargetVideoEl !== 'undefined' ? lastTargetVideoEl : null);
+  const rawSrc = (targetEl && (targetEl.currentSrc || targetEl.src)) || null;
+  if (rawSrc && !rawSrc.startsWith('blob:')) {
+    return 'src_' + cleanMediaUrl(rawSrc);
+  }
+
+  if (targetEl && rawSrc && rawSrc.startsWith('blob:')) {
+    const dur = Math.round(targetEl.duration || 0);
+    const w = targetEl.videoWidth || 0;
+    const h = targetEl.videoHeight || 0;
+    return `blob_${normalizePageUrl(currentUrl)}_${w}x${h}_${dur}`;
+  }
+
+  const norm = normalizePageUrl(currentUrl);
+  return norm ? ('page_' + norm) : 'unknown';
+}
+
+function resetVideoAnalysisState(options = {}) {
+  const { preserveYouTubeData = false, newIdentifier = null } = options;
+  hasAnalyzedCurrentVideo = false;
+  lastAnalyzedMode = null;
+  lastSummaryText = '';
+  lastSummaryPayload = null;
+  lastSummaryJson = null;
+  initialSummaryJson = null;
+  currentBoundVideoIdentifier = newIdentifier;
+  sessionId = null;
+  currentGoogleFileUri = null;
+  availableVariants = [];
+  selectedVariant = null;
+  chatHistory = [];
+  chatPagination = {};
+  currentPendingUserMsgId = null;
+  currentPendingUserQuery = '';
+  currentPendingRetryModelId = null;
+
+  if (!preserveYouTubeData) {
+    currentYouTubeData = null;
+    currentVideoUrl = null;
+  }
+
+  // Complete DOM Resets
+  const elOut = el('gvc-out');
+  if (elOut) {
+    elOut.innerText = '';
+    elOut.innerHTML = '';
+  }
+  const resArea = el('gvc-result-area');
+  if (resArea) resArea.style.display = 'none';
+
+  const rawArea = el('gvc-raw');
+  if (rawArea) {
+    rawArea.style.display = 'none';
+    rawArea.textContent = '';
+  }
+
+  const elUsage = el('gvc-token-usage');
+  if (elUsage) elUsage.style.display = 'none';
+  const elTokIn = el('gvc-tok-in');
+  if (elTokIn) elTokIn.innerText = '0';
+  const elTokOut = el('gvc-tok-out');
+  if (elTokOut) elTokOut.innerText = '0';
+  const elTokTot = el('gvc-tok-total');
+  if (elTokTot) elTokTot.innerText = '0';
+
+  const elProg = el('gvc-prog-bar') || el('gvc-p-inner');
+  if (elProg) elProg.style.width = '0%';
+
+  const elCncl = el('gvc-cancel');
+  if (elCncl) elCncl.style.display = 'none';
+
+  const nBox = el('gvc-notice-box');
+  if (nBox) {
+    nBox.style.display = 'none';
+    nBox.innerHTML = '';
+  }
+
+  const btnCont = el('gvc-btn-continue');
+  if (btnCont) btnCont.style.display = 'none';
+  const btnNew = el('gvc-btn-new-chat');
+  if (btnNew) btnNew.style.display = 'none';
+  const copyBtn = el('gvc-v-copy');
+  if (copyBtn) copyBtn.style.display = 'none';
+  const toggleBtn = el('gvc-toggle-raw');
+  if (toggleBtn) toggleBtn.style.display = 'none';
+
+  const hdrChatBtn = el('gvc-chat-hdr-btn');
+  if (hdrChatBtn) hdrChatBtn.style.display = 'none';
+  const hdrChatBadge = el('gvc-chat-hdr-badge');
+  if (hdrChatBadge) hdrChatBadge.style.display = 'none';
+
+  if (typeof closeChatPane === 'function') closeChatPane();
+  if (typeof resetChatMessages === 'function') resetChatMessages();
+
+  if (typeof updateActionButtonState === 'function') {
+    updateActionButtonState();
+  }
+}
+
 function formatRemainingTime(expiresAt) {
   if (!expiresAt) return '⚡ Active on API';
   const diffMs = expiresAt - Date.now();
@@ -738,9 +850,18 @@ async function findAllCachedStorageItems(targetPageUrl, targetMediaUrl = null, t
     if (seenUris.has(item.fileUri)) continue;
 
     let isMatch = false;
-    if (vidId && item.videoId && item.videoId === vidId) isMatch = true;
-    else if (normPage && item.pageUrl && normalizePageUrl(item.pageUrl) === normPage) isMatch = true;
-    else if (cleanMedia && item.cleanUrl && cleanMediaUrl(item.cleanUrl) === cleanMedia) isMatch = true;
+    if (vidId) {
+      if (item.videoId && item.videoId === vidId) isMatch = true;
+    } else if (cleanMedia && !cleanMedia.startsWith('blob:')) {
+      if (item.cleanUrl && cleanMediaUrl(item.cleanUrl) === cleanMedia) isMatch = true;
+    } else if (normPage && item.pageUrl && normalizePageUrl(item.pageUrl) === normPage) {
+      const itemMedia = item.cleanUrl ? cleanMediaUrl(item.cleanUrl) : '';
+      const mediaMismatch = Boolean(cleanMedia && !cleanMedia.startsWith('blob:') && itemMedia && !itemMedia.startsWith('blob:') && cleanMedia !== itemMedia);
+      const vidMismatch = Boolean(vidId && item.videoId && vidId !== item.videoId);
+      if (!mediaMismatch && !vidMismatch) {
+        isMatch = true;
+      }
+    }
 
     if (isMatch) {
       seenUris.add(item.fileUri);
@@ -836,9 +957,9 @@ async function saveToStorageHistory(entry) {
     hasSummary: !!entry.hasSummary,
     summarySnippet: entry.summarySnippet || '',
     summaryText: entry.summaryText || (entry.hasSummary ? lastSummaryText : ''),
-    summaryPayload: entry.summaryPayload || lastSummaryPayload || null,
-    summaryJson: entry.summaryJson || lastSummaryJson || null,
-    chatHistory: entry.chatHistory || (Array.isArray(chatHistory) ? chatHistory : [])
+    summaryPayload: entry.summaryPayload || (entry.hasSummary ? lastSummaryPayload : null),
+    summaryJson: entry.summaryJson || (entry.hasSummary ? lastSummaryJson : null),
+    chatHistory: entry.chatHistory || (entry.hasSummary && Array.isArray(chatHistory) ? chatHistory : [])
   };
 
   // Remove duplicate entries only if same exact resource/URI, or same video AND same API key
@@ -1072,30 +1193,46 @@ function prepareVideoDisplayWithCachedItem(item) {
     `;
   }
 
+  if (item && item.hasSummary && item.summaryText && typeof item.summaryText === 'string' && item.summaryText.trim()) {
+    lastSummaryText = item.summaryText;
+    if (item.summaryPayload) lastSummaryPayload = item.summaryPayload;
+    if (item.summaryJson) lastSummaryJson = item.summaryJson;
+    hasAnalyzedCurrentVideo = true;
+    if (elOut) {
+      elOut.innerHTML = formatResponseHTML(item.summaryText);
+      if (resArea) resArea.style.display = 'block';
+    }
+    const elRawCached = el('gvc-raw');
+    if (elRawCached && (lastSummaryJson || item.summaryText)) {
+      elRawCached.textContent = JSON.stringify(lastSummaryJson || {
+        candidates: [{ content: { parts: [{ text: item.summaryText }] } }]
+      }, null, 2);
+    }
+    if (lastSummaryJson && lastSummaryJson.usageMetadata) {
+      renderTokenUsage(lastSummaryJson.usageMetadata);
+    }
+    const copyBtn = el('gvc-v-copy');
+    if (copyBtn) copyBtn.style.display = 'inline-flex';
+    const toggleBtn = el('gvc-toggle-raw');
+    if (toggleBtn) toggleBtn.style.display = 'inline-flex';
+  } else {
+    // Unanalyzed cached item: ensure clean response and token state
+    hasAnalyzedCurrentVideo = false;
+    lastSummaryText = '';
+    lastSummaryPayload = null;
+    lastSummaryJson = null;
+    if (elOut) elOut.innerText = '';
+    if (resArea) resArea.style.display = 'none';
+    const copyBtn = el('gvc-v-copy');
+    if (copyBtn) copyBtn.style.display = 'none';
+    const toggleBtn = el('gvc-toggle-raw');
+    if (toggleBtn) toggleBtn.style.display = 'none';
+    const elUsage = el('gvc-token-usage');
+    if (elUsage) elUsage.style.display = 'none';
+  }
+
   if (elSend) {
     updateActionButtonState();
-  }
-
-  if (item && item.summaryText && !lastSummaryText) {
-    lastSummaryText = item.summaryText;
-  }
-  if (item && item.summaryPayload && !lastSummaryPayload) {
-    lastSummaryPayload = item.summaryPayload;
-  }
-  if (item && item.summaryJson && !lastSummaryJson) {
-    lastSummaryJson = item.summaryJson;
-  }
-
-  const effectiveSummary = (lastSummaryText && typeof lastSummaryText === 'string' && lastSummaryText.trim()) ? lastSummaryText : (item?.summaryText || '');
-  if (elOut && effectiveSummary) {
-    elOut.innerHTML = formatResponseHTML(effectiveSummary);
-    if (resArea) resArea.style.display = 'block';
-  }
-  const elRawCached = el('gvc-raw');
-  if (elRawCached && (lastSummaryJson || effectiveSummary)) {
-    elRawCached.textContent = JSON.stringify(lastSummaryJson || {
-      candidates: [{ content: { parts: [{ text: effectiveSummary }] } }]
-    }, null, 2);
   }
   ensureContinueChatButtonVisible();
 }
@@ -1122,6 +1259,7 @@ async function loadStorageItem(item) {
   }
 
   if (isSame) {
+    currentBoundVideoIdentifier = item.videoId ? ('yt_' + item.videoId) : (item.cleanUrl ? ('src_' + cleanMediaUrl(item.cleanUrl)) : ('page_' + normalizePageUrl(item.pageUrl)));
     currentGoogleFileUri = item.fileUri;
     sessionId = sessionId || ('s_' + Date.now());
     currentVideoSizeMB = item.sizeMB;
@@ -1216,6 +1354,7 @@ async function checkTargetPreparationOnNavigation() {
       await store.set({ gvc_prepare_target: null });
       showBox();
       switchNavTab('main');
+      currentBoundVideoIdentifier = target.videoId ? ('yt_' + target.videoId) : (target.cleanUrl ? ('src_' + cleanMediaUrl(target.cleanUrl)) : ('page_' + normalizePageUrl(target.pageUrl)));
       const isKeyMatch = isCachedItemKeyMatch(target);
       currentGoogleFileUri = target.fileUri;
       sessionId = sessionId || ('s_' + Date.now());
@@ -1359,10 +1498,11 @@ function updateActionButtonState(customState = null) {
     return;
   }
 
-  // 2. Already analyzed: show "Try Again"
+  // 2. Already analyzed: show "Try Again" (strictly requires hasAnalyzedCurrentVideo and real summary or error card)
   const outEl = el('gvc-out');
-  const hasOutSummary = Boolean((lastSummaryText && lastSummaryText.trim().length > 15) || (outEl && outEl.innerText && outEl.innerText.trim().length > 15));
-  if (hasAnalyzedCurrentVideo || hasOutSummary) {
+  const isErrCard = Boolean(outEl && (outEl.querySelector?.('.gvc-err-card') || outEl.classList?.contains('gvc-err-card')));
+  const hasValidSummary = Boolean(lastSummaryText && typeof lastSummaryText === 'string' && lastSummaryText.trim().length > 15);
+  if (hasAnalyzedCurrentVideo && (hasValidSummary || isErrCard)) {
     elSend.disabled = false;
     elSend.innerText = '🔄 Try Again';
     return;
@@ -1865,8 +2005,13 @@ function handlePortMessage(msg) {
     const elCncl = el('gvc-cancel');
     if (elCncl) elCncl.style.display = 'none';
 
-    if (elOut)  elOut.innerText = `Ready (${msg.sizeMB} MB). Complete video file ready in memory. Click "Analyze Video" below.`;
+    if (elOut)  elOut.innerText = `Ready (${msg.sizeMB} MB). Complete video file ready in memory. Click "Analyze Video" above to generate summary.`;
     hasAnalyzedCurrentVideo = false;
+    const copyBtn = el('gvc-v-copy');
+    if (copyBtn) copyBtn.style.display = 'none';
+    const toggleBtn = el('gvc-toggle-raw');
+    if (toggleBtn) toggleBtn.style.display = 'none';
+    ensureContinueChatButtonVisible();
     updateActionButtonState();
   }
 
@@ -1962,6 +2107,7 @@ function renderTokenUsage(usage) {
     isProcessing = false;
     isDownloading = false;
     hasAnalyzedCurrentVideo = true;
+    currentBoundVideoIdentifier = getVideoFingerprint(lastTargetVideoEl, currentYouTubeData);
     lastAnalyzedMode = currentYouTubeData ? currentYouTubeMode : 'generic';
     updateActionButtonState();
     if (elCncl) elCncl.style.display = 'none';
@@ -1992,8 +2138,13 @@ function renderTokenUsage(usage) {
           elRaw.textContent = JSON.stringify(j, null, 2);
           elRaw.style.display = 'none';
         }
+        const copyBtn = el('gvc-v-copy');
+        if (copyBtn) copyBtn.style.display = 'inline-flex';
         const toggleBtn = el('gvc-toggle-raw');
-        if (toggleBtn) toggleBtn.innerText = 'JSON';
+        if (toggleBtn) {
+          toggleBtn.innerText = 'JSON';
+          toggleBtn.style.display = 'inline-flex';
+        }
       }
 
       if (currentGoogleFileUri && rawTextResult) {
@@ -2866,8 +3017,8 @@ if (box) {
         <div id="gvc-out"></div>
         <div id="gvc-raw" style="display:none;"></div>
         <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center;">
-          <button id="gvc-v-copy" class="gvc-btn-sub" style="padding:6px 14px;">Copy Response</button>
-          <button id="gvc-toggle-raw" class="gvc-btn-sub" style="padding:6px 14px;">JSON</button>
+          <button id="gvc-v-copy" class="gvc-btn-sub" style="padding:6px 14px;display:none;">Copy Response</button>
+          <button id="gvc-toggle-raw" class="gvc-btn-sub" style="padding:6px 14px;display:none;">JSON</button>
           <button id="gvc-btn-continue" class="gvc-btn-continue" style="display:none;" title="Continue asking questions about this video in multi-turn chat">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
             <span>Continue Chat</span>
@@ -3981,7 +4132,8 @@ if (box) {
       const isRaw = raw && raw.style.display !== 'none';
       let t = isRaw
         ? (raw.textContent || '')
-        : (lastSummaryText || (el('gvc-out') ? el('gvc-out').innerText.replace(/\u2800/g, ' ').replace(/<br\s*[\/]?>/gi, '\n') : ''));
+        : (lastSummaryText || (hasAnalyzedCurrentVideo && el('gvc-out') ? el('gvc-out').innerText.replace(/\u2800/g, ' ').replace(/<br\s*[\/]?>/gi, '\n') : ''));
+      if (!t) return;
       navigator.clipboard.writeText(t).then(() => {
         const btn = el('gvc-copy-btn') || el('gvc-v-copy');
         const orig = btn.innerText;
@@ -4742,6 +4894,13 @@ async function renderYouTubeDualModeUI(ytData) {
   currentYouTubeData = ytData;
   currentVideoUrl = ytData.canonicalUrl;
   currentVideoLabel = ytData.title;
+
+  const ytFp = 'yt_' + ytData.videoId;
+  if (currentBoundVideoIdentifier && currentBoundVideoIdentifier !== ytFp) {
+    resetVideoAnalysisState({ preserveYouTubeData: true, newIdentifier: ytFp });
+  } else if (!currentBoundVideoIdentifier) {
+    currentBoundVideoIdentifier = ytFp;
+  }
 
   const allCached = await findAllCachedStorageItems(ytData.canonicalUrl, null, ytData.videoId);
   const activeKeyLast4 = getActiveApiKeyLast4();
@@ -5770,6 +5929,15 @@ async function extractVideoInfo(vEl) {
   }
   lastTargetVideoEl = vEl;
 
+  // Check if video identity changed from currently bound identifier
+  const targetFp = getVideoFingerprint(vEl);
+  if (currentBoundVideoIdentifier && currentBoundVideoIdentifier !== targetFp) {
+    console.log('[GVC] extractVideoInfo: Video context changed from', currentBoundVideoIdentifier, 'to', targetFp);
+    resetVideoAnalysisState({ newIdentifier: targetFp });
+  } else if (!currentBoundVideoIdentifier) {
+    currentBoundVideoIdentifier = targetFp;
+  }
+
   // ── YouTube Video Detection & Dual-Mode Activation ─────────────────────────
   const isYouTubeSite = window.location.hostname.includes('youtube.com') || window.location.hostname.includes('youtu.be');
   const ytMatch = window.location.href.match(/(?:youtu\.be\/|v=|\/embed\/|\/shorts\/)([a-zA-Z0-9_-]{11})/) ||
@@ -6381,14 +6549,7 @@ async function saveCurrentChatLog() {
 }
 
 function ensureContinueChatButtonVisible() {
-  const outEl = el('gvc-out');
-  const summaryString = (lastSummaryText && typeof lastSummaryText === 'string' && lastSummaryText.trim().length > 0)
-    ? lastSummaryText.trim()
-    : (outEl ? ((outEl.innerText || outEl.textContent || '').trim()) : '');
-  if (!lastSummaryText && summaryString.length > 15) {
-    lastSummaryText = summaryString;
-  }
-  const hasSummary = summaryString.length > 15;
+  const hasSummary = Boolean(lastSummaryText && typeof lastSummaryText === 'string' && lastSummaryText.trim().length > 15);
   const userMsgCount = (Array.isArray(chatHistory) ? chatHistory.filter(m => m && m.role === 'user').length : 0);
   const hasChat = userMsgCount > 0;
 
@@ -6428,8 +6589,6 @@ function ensureContinueChatButtonVisible() {
         hdrChatBadge.textContent = String(userMsgCount);
       }
     }
-    hasAnalyzedCurrentVideo = true;
-    updateActionButtonState();
   } else {
     // Initial start / video not summarized yet: strictly hidden
     if (btnCont) btnCont.style.display = 'none';
@@ -6471,7 +6630,12 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         if (targetVidId && entry.videoId === targetVidId) { saved = entry; break; }
         if (targetCleanId && ((entry.fileResourceName && entry.fileResourceName.includes(targetCleanId)) || (entry.fileUri && entry.fileUri.includes(targetCleanId)))) { saved = entry; break; }
         if (targetClean && cleanMediaUrl(entry.cleanUrl || entry.pageUrl) === cleanMediaUrl(targetClean)) { saved = entry; break; }
-        if (targetNorm && normalizePageUrl(entry.pageUrl) === targetNorm) { saved = entry; break; }
+        if (targetNorm && normalizePageUrl(entry.pageUrl) === targetNorm) {
+          if (targetVidId && entry.videoId && entry.videoId !== targetVidId) continue;
+          if (targetClean && entry.cleanUrl && cleanMediaUrl(entry.cleanUrl) !== cleanMediaUrl(targetClean)) continue;
+          saved = entry;
+          break;
+        }
       }
     }
 
@@ -6505,6 +6669,9 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         chatHistory = [];
         renderChatMessagesFromHistory([]);
       }
+      if (!lastSummaryText) {
+        hasAnalyzedCurrentVideo = false;
+      }
       ensureContinueChatButtonVisible();
       return false;
     }
@@ -6525,11 +6692,11 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
       }
     }
 
-    const summaryToRestore = (saved.summaryText && saved.summaryText.trim()) || (targetItem && targetItem.summaryText && targetItem.summaryText.trim()) || lastSummaryText;
+    const summaryToRestore = (saved && saved.summaryText && saved.summaryText.trim()) || (targetItem && targetItem.summaryText && targetItem.summaryText.trim()) || '';
     if (summaryToRestore) {
       lastSummaryText = summaryToRestore;
-      if (saved.summaryPayload || targetItem?.summaryPayload) lastSummaryPayload = saved.summaryPayload || targetItem?.summaryPayload;
-      if (saved.summaryJson || targetItem?.summaryJson) lastSummaryJson = saved.summaryJson || targetItem?.summaryJson;
+      if (saved?.summaryPayload || targetItem?.summaryPayload) lastSummaryPayload = saved?.summaryPayload || targetItem?.summaryPayload;
+      if (saved?.summaryJson || targetItem?.summaryJson) lastSummaryJson = saved?.summaryJson || targetItem?.summaryJson;
 
       hasAnalyzedCurrentVideo = true;
       updateActionButtonState();
@@ -6539,6 +6706,10 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
         elOut.innerHTML = formatResponseHTML(summaryToRestore);
         const resArea = el('gvc-result-area');
         if (resArea) resArea.style.display = 'block';
+        const copyBtn = el('gvc-v-copy');
+        if (copyBtn) copyBtn.style.display = 'inline-flex';
+        const toggleBtn = el('gvc-toggle-raw');
+        if (toggleBtn) toggleBtn.style.display = 'inline-flex';
         const rawArea = el('gvc-raw');
         if (rawArea) {
           rawArea.style.display = 'none';
@@ -6559,6 +6730,26 @@ async function restoreSavedChatLogForCurrentVideo(targetItem = null) {
       if (lastSummaryJson && lastSummaryJson.usageMetadata) {
         renderTokenUsage(lastSummaryJson.usageMetadata);
       }
+    } else {
+      // Cleanly reset any lingering summary or token display if this video has no saved summary
+      hasAnalyzedCurrentVideo = false;
+      lastSummaryText = '';
+      lastSummaryPayload = null;
+      lastSummaryJson = null;
+      const elOut = el('gvc-out');
+      if (elOut) { elOut.innerText = ''; elOut.innerHTML = ''; }
+      const resArea = el('gvc-result-area');
+      if (resArea) resArea.style.display = 'none';
+      const copyBtn = el('gvc-v-copy');
+      if (copyBtn) copyBtn.style.display = 'none';
+      const toggleBtn = el('gvc-toggle-raw');
+      if (toggleBtn) toggleBtn.style.display = 'none';
+      const elUsage = el('gvc-token-usage');
+      if (elUsage) elUsage.style.display = 'none';
+      const elTokIn = el('gvc-tok-in'); if (elTokIn) elTokIn.innerText = '0';
+      const elTokOut = el('gvc-tok-out'); if (elTokOut) elTokOut.innerText = '0';
+      const elTokTot = el('gvc-tok-total'); if (elTokTot) elTokTot.innerText = '0';
+      updateActionButtonState();
     }
 
     // 2. Restore real chat history
@@ -8376,14 +8567,25 @@ function findAllVideos() {
 }
 
 function findActiveVideo() {
-  if (lastTargetVideoEl && lastTargetVideoEl.isConnected) {
-    return lastTargetVideoEl;
-  }
-  if (lastContextVideo && lastContextVideo.isConnected) {
-    return lastContextVideo;
+  const allVideos = findAllVideos().filter(v => v && v.isConnected);
+  if (!allVideos.length) return null;
+
+  // 1. Prioritize currently playing video
+  const playing = allVideos.filter(v => !v.paused && !v.ended && v.currentTime > 0);
+  if (playing.length === 1) return playing[0];
+  if (playing.length > 1) {
+    let best = playing[0];
+    let maxArea = 0;
+    for (const v of playing) {
+      const r = v.getBoundingClientRect();
+      const area = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0)) *
+                   Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
+      if (area > maxArea) { maxArea = area; best = v; }
+    }
+    return best;
   }
 
-  // 1. On Twitter: if on status page (/status/\d+), prioritize the video for this specific tweet
+  // 2. On Twitter: if on status page (/status/\d+), prioritize the video for this specific tweet
   if (isTwitter) {
     const statusMatch = window.location.pathname.match(/status\/(\d+)/);
     if (statusMatch) {
@@ -8403,25 +8605,17 @@ function findActiveVideo() {
     }
   }
 
-  const allVideos = findAllVideos().filter(v => v && v.isConnected);
-  if (!allVideos.length) return null;
-
-  // 2. Prioritize currently playing video
-  const playing = allVideos.filter(v => !v.paused && !v.ended && v.currentTime > 0);
-  if (playing.length === 1) return playing[0];
-  if (playing.length > 1) {
-    let best = playing[0];
-    let maxArea = 0;
-    for (const v of playing) {
-      const r = v.getBoundingClientRect();
-      const area = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0)) *
-                   Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
-      if (area > maxArea) { maxArea = area; best = v; }
+  // 3. If a target video was previously focused and is actively visible in viewport
+  if (lastTargetVideoEl && lastTargetVideoEl.isConnected && !lastTargetVideoEl.ended) {
+    const r = lastTargetVideoEl.getBoundingClientRect();
+    const visibleWidth = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
+    const visibleHeight = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+    if (visibleWidth > 50 && visibleHeight > 50) {
+      return lastTargetVideoEl;
     }
-    return best;
   }
 
-  // 3. Prioritize video with largest visible area in viewport
+  // 4. Prioritize video with largest visible area in viewport
   let best = null;
   let maxArea = 0;
   for (const v of allVideos) {
@@ -8569,34 +8763,11 @@ async function openAndExtract(vEl) {
 
   if (!box) return;
   showBox();
-  sessionId = null;
-  currentVideoUrl = null;
-  currentGoogleFileUri = null;
-  availableVariants = [];
-  selectedVariant = null;
   lastTargetVideoEl = vEl;
   lastContextVideo = vEl;
 
-  // Complete UI reset
-  const elSend = el('gvc-send');
-  const elCncl = el('gvc-cancel');
-  const elOut  = el('gvc-out');
-  const elRes  = el('gvc-result-area');
-  const elRaw  = el('gvc-raw');
-  const elProg = el('gvc-p-inner');
-
-  hasAnalyzedCurrentVideo = false;
-  lastAnalyzedMode = null;
-  lastSummaryText = '';
-  lastSummaryJson = null;
-  updateActionButtonState();
-  if (elCncl) elCncl.style.display = 'none';
-  if (elRes)  elRes.style.display = 'none';
-  if (elRaw)  elRaw.style.display = 'none';
-  if (elOut)  elOut.innerText = '';
-  if (elProg) elProg.style.width = '0%';
-  if (el('gvc-token-usage')) el('gvc-token-usage').style.display = 'none';
-  ensureContinueChatButtonVisible();
+  const newFp = getVideoFingerprint(vEl);
+  resetVideoAnalysisState({ newIdentifier: newFp });
 
   if (port) {
     try { port.disconnect(); } catch (_) {}
@@ -8613,6 +8784,25 @@ function attachBadgeToVideo(video) {
   if (S.gic_v_show_video_badge === false) return;
   if (!video || !video.isConnected || video.ownerDocument !== document) return;
   if (dismissedVideoBadges.has(video) || video.__gvc_badge_dismissed) return;
+
+  // Track video source and metadata switches on the same page
+  if (!video.__gvc_src_listener_attached) {
+    video.__gvc_src_listener_attached = true;
+    const onVideoSrcChange = () => {
+      if (lastTargetVideoEl === video) {
+        const newFp = getVideoFingerprint(video);
+        if (currentBoundVideoIdentifier && currentBoundVideoIdentifier !== newFp) {
+          console.log('[GVC] Video element src/metadata changed. Resetting analysis state.');
+          resetVideoAnalysisState({ newIdentifier: newFp });
+          if (box && box.style.display === 'flex') {
+            extractVideoInfo(video);
+          }
+        }
+      }
+    };
+    video.addEventListener('loadstart', onVideoSrcChange, { passive: true });
+    video.addEventListener('loadedmetadata', onVideoSrcChange, { passive: true });
+  }
 
   // In an iframe (!isTopFrame), enforce strictly AT MOST ONE video badge per iframe document
   if (!isTopFrame) {
@@ -8994,10 +9184,8 @@ try {
   if (msg.type === 'OPEN_VIDEO_FROM_IFRAME') {
     if (!isTopFrame || !box) return;
     showBox();
-    sessionId = null;
-    currentGoogleFileUri = null;
-    availableVariants = [];
-    selectedVariant = null;
+    const iframeFp = msg.videoUrl ? ('src_' + cleanMediaUrl(msg.videoUrl)) : null;
+    resetVideoAnalysisState({ newIdentifier: iframeFp });
 
     connectPort();
 
@@ -9144,6 +9332,7 @@ try {
       openAndExtract({ currentSrc: msg.mediaUrl, src: msg.mediaUrl });
     } else {
       showBox();
+      resetVideoAnalysisState({ newIdentifier: getVideoFingerprint(null) });
       extractVideoInfo(null);
     }
     return;
@@ -9162,6 +9351,7 @@ try {
       if (vEl) openAndExtract(vEl);
       else {
         showBox();
+        resetVideoAnalysisState({ newIdentifier: getVideoFingerprint(null) });
         extractVideoInfo(null);
       }
     }
@@ -9178,45 +9368,15 @@ function checkSpaUrlNavigation() {
     currentNavUrl = window.location.href;
     lastContextVideo = null;
     lastTargetVideoEl = null;
-    availableVariants = [];
-    selectedVariant = null;
-    hasAnalyzedCurrentVideo = false;
-    lastAnalyzedMode = null;
-    lastSummaryText = '';
-    lastSummaryPayload = null;
-    lastSummaryJson = null;
-    currentGoogleFileUri = null;
-    sessionId = null;
-    currentYouTubeData = null;
-    chatHistory = [];
-    chatPagination = {};
-    currentPendingUserMsgId = null;
-    currentPendingUserQuery = '';
-    currentPendingRetryModelId = null;
 
     try {
       dismissedVideoBadges = new WeakSet();
       document.querySelectorAll('video').forEach(v => { v.__gvc_badge_dismissed = false; });
     } catch (_) {}
 
-    closeChatPane();
-    const btnCont = el('gvc-btn-continue');
-    if (btnCont) btnCont.style.display = 'none';
-    const btnNew = el('gvc-btn-new-chat');
-    if (btnNew) btnNew.style.display = 'none';
+    const newNavFp = getVideoFingerprint(null, null, window.location.href);
+    resetVideoAnalysisState({ newIdentifier: newNavFp });
 
-    const elOut = el('gvc-out');
-    if (elOut) elOut.innerText = '';
-    const resArea = el('gvc-result-area');
-    if (resArea) resArea.style.display = 'none';
-    const rawArea = el('gvc-raw');
-    if (rawArea) rawArea.style.display = 'none';
-    const elProg = el('gvc-prog-bar');
-    if (elProg) elProg.style.width = '0%';
-    const elUsage = el('gvc-token-usage');
-    if (elUsage) elUsage.style.display = 'none';
-
-    updateActionButtonState();
     connectPort();
     if (port) {
       try { port.postMessage({ type: 'CLEAR_TAB_STREAMS' }); } catch (_) {}
@@ -9237,10 +9397,45 @@ function checkSpaUrlNavigation() {
     }, 300);
   }
 }
-window.addEventListener('popstate', checkSpaUrlNavigation);
-window.addEventListener('yt-navigate-finish', checkSpaUrlNavigation);
-document.addEventListener('yt-navigate-finish', checkSpaUrlNavigation);
-spaIntervalId = setInterval(checkSpaUrlNavigation, 1000);
+
+window.addEventListener('popstate', checkSpaUrlNavigation, { passive: true });
+window.addEventListener('hashchange', checkSpaUrlNavigation, { passive: true });
+window.addEventListener('yt-navigate-start', checkSpaUrlNavigation, { passive: true });
+window.addEventListener('yt-navigate-finish', checkSpaUrlNavigation, { passive: true });
+document.addEventListener('yt-navigate-finish', checkSpaUrlNavigation, { passive: true });
+['yt-page-data-updated', 'yt-player-updated'].forEach((evt) => {
+  window.addEventListener(evt, checkSpaUrlNavigation, { passive: true });
+  document.addEventListener(evt, checkSpaUrlNavigation, { passive: true });
+});
+
+// Intercept pushState & replaceState within the content script context as well
+try {
+  const origPush = history.pushState;
+  if (typeof origPush === 'function') {
+    history.pushState = function() {
+      const res = origPush.apply(this, arguments);
+      checkSpaUrlNavigation();
+      return res;
+    };
+  }
+  const origReplace = history.replaceState;
+  if (typeof origReplace === 'function') {
+    history.replaceState = function() {
+      const res = origReplace.apply(this, arguments);
+      checkSpaUrlNavigation();
+      return res;
+    };
+  }
+} catch (_) {}
+
+// Receive GVC_NAVIGATED notifications from main_world.js
+window.addEventListener('message', (ev) => {
+  if (ev && ev.data && ev.data.type === 'GVC_NAVIGATED') {
+    checkSpaUrlNavigation();
+  }
+}, { passive: true });
+
+spaIntervalId = setInterval(checkSpaUrlNavigation, 250);
 
 // ── Ultra-Low Overhead MutationObserver (Only triggers on video/iframe DOM additions) ──
 let scanTimeout = null;
